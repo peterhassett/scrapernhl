@@ -1,6 +1,6 @@
 """
-NHL DATA SCRAPER - MAIN RUNNER
-Managed Tables and Columns:
+NHL DATA SCRAPER - MAIN RUNNER (Resilient Version)
+Managed Tables:
 - players: player_id, first_name, last_name, birth_date, height_in_centimeters, 
            weight_in_pounds, shoots_catches, headshot_url (UPSERT)
 - player_game_stats: player_id, game_id, strength, toi_sec, cf, ca, ff, fa, sf, sa, 
@@ -23,7 +23,7 @@ try:
 except ImportError:
     from scraper import pipeline, on_ice_stats_by_player_strength, scrapeStandings, scrapeRoster
 
-# Force unbuffered output for cleaner logs
+# Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
 
 # 2. DATABASE SETUP
@@ -33,28 +33,72 @@ if DB_URL and DB_URL.startswith("postgres://"):
 
 engine = create_engine(DB_URL, connect_args={'sslmode': 'require'}, pool_pre_ping=True)
 
+# --- RESILIENCY HELPERS ---
+
+def get_safe_df(engine, df, target_table):
+    """Returns a DataFrame containing only columns that exist in the target DB table."""
+    with engine.connect() as conn:
+        query = text(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{target_table}'")
+        db_cols = [row[0] for row in conn.execute(query)]
+    
+    safe_cols = [c for c in df.columns if c in db_cols]
+    return df[safe_cols]
+
+def upsert_table(engine, df, table_name, constraint_cols, is_accumulation=False):
+    """Robustly upserts any dataframe into any table by matching columns automatically."""
+    if df.empty: return
+    
+    # 1. Standardize column names to lowercase for matching
+    df.columns = [c.lower().replace('.', '_') for c in df.columns]
+    
+    # 2. Filter to only columns existing in the DB
+    df_safe = get_safe_df(engine, df, table_name)
+    df_safe.to_sql("temp_staging", engine, if_exists="replace", index=False)
+    
+    # 3. Build dynamic SQL for UPSERT or ACCUMULATION
+    cols = [f'"{c}"' for c in df_safe.columns]
+    col_list = ", ".join(cols)
+    
+    if is_accumulation:
+        # For team_season_stats: Add values together (gp = gp + 1, cf = cf + excluded.cf)
+        update_parts = []
+        for c in df_safe.columns:
+            if c not in constraint_cols:
+                if c == 'gp':
+                    update_parts.append(f"{c} = {table_name}.{c} + 1")
+                else:
+                    update_parts.append(f"{c} = {table_name}.{c} + EXCLUDED.{c}")
+        update_list = ", ".join(update_parts)
+    else:
+        # For players/player_stats: Overwrite with latest value
+        update_list = ", ".join([f'{c} = EXCLUDED.{c}' for c in cols if c.strip('"') not in constraint_cols])
+    
+    upsert_query = f"""
+        INSERT INTO {table_name} ({col_list})
+        SELECT {col_list} FROM temp_staging
+        ON CONFLICT ({", ".join(constraint_cols)}) 
+        DO UPDATE SET {update_list};
+    """
+    
+    with engine.begin() as conn:
+        conn.execute(text(upsert_query))
+
 def get_team_stats(pbp_wide):
     """Aggregates play-by-play data into team-level totals."""
     results = []
-    
-    # Dynamically find the time column (it might be seconds_elapsed, seconds, or time)
-    time_col = next((c for c in ['seconds_elapsed', 'seconds', 'time', 'timeInPeriod'] if c in pbp_wide.columns), None)
+    # Identify time column dynamically
+    time_col = next((c for c in ['seconds_elapsed', 'seconds', 'timeInPeriod'] if c in pbp_wide.columns), None)
     
     for s in ['EV', 'PP', 'PK']:
         df_s = pbp_wide[pbp_wide['strength'] == s]
         if df_s.empty: continue
         
-        home_id = str(df_s['homeTeam'].iloc[0])
-        away_id = str(df_s['awayTeam'].iloc[0])
-        
-        # Calculate TOI based on unique timestamps in this strength state
+        h_id, a_id = str(df_s['homeTeam'].iloc[0]), str(df_s['awayTeam'].iloc[0])
         toi = len(df_s[time_col].unique()) if time_col else 0
 
-        for t_id, opp_id in [(home_id, away_id), (away_id, home_id)]:
+        for t_id, opp_id in [(h_id, a_id), (a_id, h_id)]:
             results.append({
-                'team_id': t_id,
-                'strength': s,
-                'toi': toi,
+                'team_id': t_id, 'strength': s, 'toi_sec': toi, 'gp': 1,
                 'cf': len(df_s[df_s['eventTeam'] == t_id]),
                 'ca': len(df_s[df_s['eventTeam'] == opp_id]),
                 'gf': len(df_s[(df_s['eventTeam'] == t_id) & (df_s['Event'] == 'GOAL')]),
@@ -64,61 +108,40 @@ def get_team_stats(pbp_wide):
             })
     return pd.DataFrame(results)
 
+# --- MAIN RUNNER ---
+
 def run_pipeline(game_id):
-    print(f"RUNNER: Starting process for Game {game_id}")
+    print(f"RUNNER: Starting Resilient Pipeline for Game {game_id}")
     try:
         pbp_wide, _ = pipeline(game_id)
-        p_stats = on_ice_stats_by_player_strength(pbp_wide)
-        t_stats = get_team_stats(pbp_wide)
-        
-        home_team = pbp_wide['homeTeam'].dropna().iloc[0]
-        away_team = pbp_wide['awayTeam'].dropna().iloc[0]
         start_year = int(str(game_id)[:4])
         season = f"{start_year}{start_year + 1}"
 
-        print(f"RUNNER: Fetching rosters for {home_team} and {away_team}")
-        players_df = pd.concat([scrapeRoster(home_team, season), scrapeRoster(away_team, season)])
+        # 1. PLAYER GAME STATS
+        p_stats = on_ice_stats_by_player_strength(pbp_wide)
+        p_stats['game_id'] = game_id
+        p_stats = p_stats.rename(columns={'player1id': 'player_id', 'seconds': 'toi_sec'})
+        upsert_table(engine, p_stats, "player_game_stats", ['player_id', 'game_id', 'strength'])
 
-        with engine.begin() as conn:
-            # 1. PLAYERS
-            players_df.columns = [c.lower().replace('.', '_') for c in players_df.columns]
-            players_df.to_sql("temp_players", conn, if_exists="replace", index=False)
-            conn.execute(text("""
-                INSERT INTO players (player_id, first_name, last_name, birth_date, height_in_centimeters, weight_in_pounds, shoots_catches, headshot_url)
-                SELECT id, firstname_default, lastname_default, birthdate::DATE, heightincentimeters, weightinpounds, shootscatches, headshot FROM temp_players
-                ON CONFLICT (player_id) DO UPDATE SET first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, birth_date = EXCLUDED.birth_date;
-            """))
+        # 2. TEAM SEASON STATS
+        t_stats = get_team_stats(pbp_wide)
+        t_stats['season_id'] = int(season)
+        upsert_table(engine, t_stats, "team_season_stats", ['team_id', 'season_id', 'strength'], is_accumulation=True)
 
-            # 2. PLAYER GAME STATS
-            p_stats['game_id'] = game_id
-            p_stats.columns = [c.lower() for c in p_stats.columns]
-            p_stats.to_sql("temp_p_stats", conn, if_exists="replace", index=False)
-            conn.execute(text("""
-                INSERT INTO player_game_stats (player_id, game_id, strength, toi_sec, cf, ca, ff, fa, sf, sa, gf, ga, xgf, xga, pf, pa, give_for, give_against, take_for, take_against)
-                SELECT player1id, game_id, strength, seconds, cf, ca, ff, fa, sf, sa, gf, ga, xg::float, xga::float, pf, pa, give_for, give_against, take_for, take_against FROM temp_p_stats
-                ON CONFLICT (player_id, game_id, strength) DO UPDATE SET toi_sec = EXCLUDED.toi_sec, cf = EXCLUDED.cf, give_for = EXCLUDED.give_for, take_for = EXCLUDED.take_for;
-            """))
+        # 3. PLAYER BIOS
+        h_team = pbp_wide['homeTeam'].dropna().iloc[0]
+        a_team = pbp_wide['awayTeam'].dropna().iloc[0]
+        players_df = pd.concat([scrapeRoster(h_team, season), scrapeRoster(a_team, season)])
+        # Bio data needs the birthdate cast specifically in SQL, so we rename it here
+        players_df = players_df.rename(columns={'id': 'player_id', 'birthdate': 'birth_date', 'headshot': 'headshot_url'})
+        upsert_table(engine, players_df, "players", ['player_id'])
 
-            # 3. TEAM SEASON STATS
-            t_stats['season_id'] = int(season)
-            t_stats.to_sql("temp_t_stats", conn, if_exists="replace", index=False)
-            conn.execute(text("""
-                INSERT INTO team_season_stats (team_id, season_id, strength, gp, toi_sec, cf, ca, gf, ga, xgf, xga)
-                SELECT team_id, season_id, strength, 1, toi, cf, ca, gf, ga, xgf, xga FROM temp_t_stats
-                ON CONFLICT (team_id, season_id, strength) DO UPDATE SET 
-                    gp = team_season_stats.gp + 1,
-                    toi_sec = team_season_stats.toi_sec + EXCLUDED.toi_sec,
-                    cf = team_season_stats.cf + EXCLUDED.cf,
-                    gf = team_season_stats.gf + EXCLUDED.gf,
-                    xgf = team_season_stats.xgf + EXCLUDED.xgf;
-            """))
+        # 4. STANDINGS (Standard Replace)
+        standings = scrapeStandings()
+        standings.columns = [c.lower().replace('.', '_') for c in standings.columns]
+        standings.to_sql("standings", engine, if_exists="replace", index=False)
 
-            # 4. STANDINGS
-            standings = scrapeStandings()
-            standings.columns = [c.lower().replace('.', '_') for c in standings.columns]
-            standings.to_sql("standings", conn, if_exists="replace", index=False)
-
-        print(f"SUCCESS: Game {game_id} processed.")
+        print(f"SUCCESS: Game {game_id} fully synced.")
     except Exception as e:
         print(f"CRITICAL ERROR: {str(e)}")
         import traceback
