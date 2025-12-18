@@ -2,9 +2,13 @@ import os
 import sys
 import pandas as pd
 from sqlalchemy import create_engine, text
-from scraper import pipeline, on_ice_stats_by_player_strength
 
-# Force unbuffered output for GitHub Actions logs
+try:
+    from scrapernhl.scraper import pipeline, on_ice_stats_by_player_strength
+except ImportError:
+    # Fallback for the PYTHONPATH method
+    from scraper import pipeline, on_ice_stats_by_player_strength
+    
 sys.stdout.reconfigure(line_buffering=True)
 
 print("PYTHON STARTING...")
