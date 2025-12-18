@@ -97,19 +97,25 @@ def upsert_table(engine, df, table_name, constraint_cols, is_accumulation=False)
 def get_team_stats(pbp_wide):
     """Aggregates play-by-play data into team-level totals."""
     results = []
-    # Identify time column dynamically (can be seconds_elapsed or seconds)
-    time_col = next((c for c in ['seconds_elapsed', 'seconds', 'timeInPeriod'] if c in pbp_wide.columns), None)
+    # Identify time column dynamically
+    time_cols = ['seconds_elapsed', 'seconds', 'timeInPeriod', 'time_elapsed']
+    time_col = next((c for c in time_cols if c in pbp_wide.columns), None)
     
     for s in ['EV', 'PP', 'PK']:
         df_s = pbp_wide[pbp_wide['strength'] == s]
         if df_s.empty: continue
         
-        h_id, a_id = str(df_s['homeTeam'].iloc[0]), str(df_s['awayTeam'].iloc[0])
+        h_id = str(df_s['homeTeam'].iloc[0])
+        a_id = str(df_s['awayTeam'].iloc[0])
         toi = len(df_s[time_col].unique()) if time_col else 0
 
         for t_id, opp_id in [(h_id, a_id), (a_id, h_id)]:
             results.append({
-                'team_id': t_id, 'strength': s, 'toi_sec': toi, 'gp': 1,
+                'team_id': t_id,    # MUST match your DB column name exactly
+                'season_id': None,  # Will be filled in run_pipeline
+                'strength': s, 
+                'toi_sec': toi, 
+                'gp': 1,
                 'cf': len(df_s[df_s['eventTeam'] == t_id]),
                 'ca': len(df_s[df_s['eventTeam'] == opp_id]),
                 'gf': len(df_s[(df_s['eventTeam'] == t_id) & (df_s['Event'] == 'GOAL')]),
