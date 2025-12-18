@@ -67,11 +67,20 @@ def run_pipeline(game_id):
             game_df.to_sql("temp_game", conn, if_exists="replace", index=False)
             conn.execute(text("""
                 INSERT INTO games (game_id, season_id, game_date, home_team, away_team, home_score, away_score, game_type, venue)
-                SELECT game_id, season_id, game_date, home_team, away_team, home_score, away_score, game_type, venue FROM temp_game
+                SELECT 
+                    game_id, 
+                    season_id, 
+                    game_date::date,
+                    home_team, 
+                    away_team, 
+                    home_score, 
+                    away_score, 
+                    game_type, 
+                    venue 
+                FROM temp_game
                 ON CONFLICT (game_id) DO UPDATE SET 
                     home_score = EXCLUDED.home_score, away_score = EXCLUDED.away_score;
             """))
-
             print("--- Pushing Player Game Stats ---")
             stats_df.to_sql("temp_stats", conn, if_exists="replace", index=False)
 
