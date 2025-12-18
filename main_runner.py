@@ -25,7 +25,8 @@ if DB_URL.startswith("postgres://"):
 
 engine = create_engine(
     DB_URL, 
-    connect_args={'sslmode': 'require'}
+    connect_args={'sslmode': 'require'},
+    pool_pre_ping=True
 )
 
 def run_pipeline(game_id):
