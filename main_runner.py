@@ -54,13 +54,29 @@ def run_pipeline(game_id):
         # PUSH TO DB
         with engine.begin() as conn:
             
-            print("--- Pushing Players ---")
-            players_df.to_sql("temp_players", conn, if_exists="replace", index=False)
+            print("--- Pushing Player Game Stats ---")
+            # This line ensures the DataFrame columns are lowercase before the push
+            stats_df.columns = [c.lower() for c in stats_df.columns]
+            
+            stats_df.to_sql("temp_stats", conn, if_exists="replace", index=False)
+
             conn.execute(text("""
-                INSERT INTO players (player_id, full_name, default_pos, headshot_url)
-                SELECT "playerId", "fullName", "positionCode", "headshot" FROM temp_players
-                ON CONFLICT (player_id) DO UPDATE SET 
-                    full_name = EXCLUDED.full_name, headshot_url = EXCLUDED.headshot_url;
+                INSERT INTO player_game_stats (player_id, game_id, strength, toi_sec, cf, ca, gf, ga, xgf, xga)
+                SELECT 
+                    player1id,
+                    gameid, 
+                    strength, 
+                    seconds, 
+                    cf, 
+                    ca, 
+                    gf, 
+                    ga, 
+                    xg::float, 
+                    xga::float
+                FROM temp_stats
+                ON CONFLICT (player_id, game_id, strength) 
+                DO UPDATE SET 
+                    toi_sec = EXCLUDED.toi_sec, cf = EXCLUDED.cf, xgf = EXCLUDED.xgf;
             """))
 
             print("--- Pushing Game Metadata ---")
