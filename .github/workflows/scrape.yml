@@ -1,0 +1,38 @@
+name: NHL Daily Scraper
+
+on:
+  schedule:
+    # Runs at 10:00 UTC (5:00 AM EST) every day
+    - cron: '0 10 * * *'
+  workflow_dispatch: 
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip' # Speeds up subsequent runs by caching libraries
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpq-dev # Required for psycopg2 (Postgres)
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Installing heavy hitters required for your script
+          pip install pandas polars xgboost sqlalchemy psycopg2-binary joblib requests beautifulsoup4 selectolax
+
+      - name: Run Scraper
+        env:
+          # This pulls the connection string from your GitHub Secrets
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python main.py
