@@ -1,6 +1,6 @@
 """
 NHL DATA SCRAPER - MAIN RUNNER
-Tables and Columns:
+Managed Tables and Columns:
 - players: player_id, first_name, last_name, birth_date, height_in_centimeters, weight_in_pounds, shoots_catches, headshot_url (UPSERT on player_id)
 - player_game_stats: player_id, game_id, strength, toi_sec, cf, ca, ff, fa, sf, sa, gf, ga, xgf, xga, pf, pa, giveaways_for, giveaways_against, takeaways_for, takeaways_against (UPSERT on player_id, game_id, strength)
 - standings: snapshot of current league rankings (REPLACE full table on each run)
@@ -48,15 +48,19 @@ def run_pipeline(game_id):
         pbp_wide, _ = pipeline(game_id)
         stats_df = on_ice_stats_by_player_strength(pbp_wide)
         
+        # EXTRACT TEAMS AND VALID 8-DIGIT SEASON FOR BIO SCRAPING
         home_team = pbp_wide['homeTeam'].dropna().iloc[0]
         away_team = pbp_wide['awayTeam'].dropna().iloc[0]
         
+        # Correctly derive the 8-digit season (e.g., 2024 -> 20242025)
         start_year = int(str(game_id)[:4])
         season = f"{start_year}{start_year + 1}"
 
+        # GET FULL BIOS (This defines players_df)
         print(f"RUNNER: Fetching full roster bios for {home_team} and {away_team} for season {season}")
         home_bio = scrapeRoster(home_team, season)
         away_bio = scrapeRoster(away_team, season)
+        players_df = pd.concat([home_bio, away_bio])
 
         with engine.begin() as conn:
             # --- PUSH PLAYER BIOS ---
@@ -141,5 +145,4 @@ def run_pipeline(game_id):
         sys.exit(1)
 
 if __name__ == "__main__":
-    # Example game ID for processing
     run_pipeline(2024020123)
