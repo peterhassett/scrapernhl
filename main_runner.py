@@ -48,16 +48,15 @@ def run_pipeline(game_id):
         pbp_wide, _ = pipeline(game_id)
         stats_df = on_ice_stats_by_player_strength(pbp_wide)
         
-        # EXTRACT TEAMS FOR FULL BIO SCRAPING
         home_team = pbp_wide['homeTeam'].dropna().iloc[0]
         away_team = pbp_wide['awayTeam'].dropna().iloc[0]
-        season = str(game_id)[:8]
+        
+        start_year = int(str(game_id)[:4])
+        season = f"{start_year}{start_year + 1}"
 
-        # GET FULL BIOS (Using existing scraper capability)
-        print(f"RUNNER: Fetching full roster bios for {home_team} and {away_team}")
+        print(f"RUNNER: Fetching full roster bios for {home_team} and {away_team} for season {season}")
         home_bio = scrapeRoster(home_team, season)
         away_bio = scrapeRoster(away_team, season)
-        players_df = pd.concat([home_bio, away_bio])
 
         with engine.begin() as conn:
             # --- PUSH PLAYER BIOS ---
