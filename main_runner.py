@@ -1,6 +1,6 @@
 """
 NHL DATA SCRAPER - MAIN RUNNER
-Managed Tables:
+Managed Tables and Columns:
 - players: player_id, first_name, last_name, birth_date, height_in_centimeters, 
            weight_in_pounds, shoots_catches, headshot_url (UPSERT)
 - player_game_stats: player_id, game_id, strength, toi_sec, cf, ca, ff, fa, sf, sa, 
@@ -54,9 +54,10 @@ def get_team_stats(pbp_wide):
         df_s = pbp_wide[pbp_wide['strength'] == s]
         if df_s.empty: continue
         
-        home_id = int(df_s['homeTeam'].iloc[0])
-        away_id = int(df_s['awayTeam'].iloc[0])
-        # TOI is derived from unique seconds elapsed in this strength state
+        # FIX: Team IDs are strings (e.g., 'PHI'), not ints
+        home_id = str(df_s['homeTeam'].iloc[0])
+        away_id = int(df_s['awayTeam'].iloc[0]) if str(df_s['awayTeam'].iloc[0]).isdigit() else str(df_s['awayTeam'].iloc[0])
+        
         toi = len(df_s['seconds_elapsed'].unique())
 
         for t_id, opp_id in [(home_id, away_id), (away_id, home_id)]:
