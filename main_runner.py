@@ -23,7 +23,10 @@ if not DB_URL:
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(DB_URL)
+engine = create_engine(
+    DB_URL, 
+    connect_args={'sslmode': 'require'}
+)
 
 def run_pipeline(game_id):
     print(f"🚀 Processing Game: {game_id}")
