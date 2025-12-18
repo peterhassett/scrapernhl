@@ -19,9 +19,19 @@ from sqlalchemy import create_engine, text
 
 # 1. HANDLE IMPORTS
 try:
-    from scrapernhl.scraper import pipeline, on_ice_stats_by_player_strength, scrapeStandings, scrapeRoster
+    from scrapernhl.scraper import (
+        pipeline, 
+        on_ice_stats_by_player_strength, 
+        scrapeStandings, 
+        scrapeRoster
+    )
 except ImportError:
-    from scraper import pipeline, on_ice_stats_by_player_strength, scrapeStandings, scrapeRoster
+    from scraper import (
+        pipeline, 
+        on_ice_stats_by_player_strength, 
+        scrapeStandings, 
+        scrapeRoster
+    )
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -41,6 +51,7 @@ def get_safe_df(engine, df, target_table):
         query = text(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{target_table}'")
         db_cols = [row[0] for row in conn.execute(query)]
     
+    # Filter to only the intersection of columns
     safe_cols = [c for c in df.columns if c in db_cols]
     return df[safe_cols]
 
@@ -48,19 +59,19 @@ def upsert_table(engine, df, table_name, constraint_cols, is_accumulation=False)
     """Robustly upserts any dataframe into any table by matching columns automatically."""
     if df.empty: return
     
-    # 1. Standardize column names to lowercase for matching
+    # 1. Standardize column names
     df.columns = [c.lower().replace('.', '_') for c in df.columns]
     
     # 2. Filter to only columns existing in the DB
     df_safe = get_safe_df(engine, df, table_name)
     df_safe.to_sql("temp_staging", engine, if_exists="replace", index=False)
     
-    # 3. Build dynamic SQL for UPSERT or ACCUMULATION
+    # 3. Build dynamic SQL
     cols = [f'"{c}"' for c in df_safe.columns]
     col_list = ", ".join(cols)
     
     if is_accumulation:
-        # For team_season_stats: Add values together (gp = gp + 1, cf = cf + excluded.cf)
+        # For team_season_stats: Accumulate totals
         update_parts = []
         for c in df_safe.columns:
             if c not in constraint_cols:
@@ -70,7 +81,7 @@ def upsert_table(engine, df, table_name, constraint_cols, is_accumulation=False)
                     update_parts.append(f"{c} = {table_name}.{c} + EXCLUDED.{c}")
         update_list = ", ".join(update_parts)
     else:
-        # For players/player_stats: Overwrite with latest value
+        # For players/player_stats: Standard Overwrite
         update_list = ", ".join([f'{c} = EXCLUDED.{c}' for c in cols if c.strip('"') not in constraint_cols])
     
     upsert_query = f"""
@@ -86,7 +97,7 @@ def upsert_table(engine, df, table_name, constraint_cols, is_accumulation=False)
 def get_team_stats(pbp_wide):
     """Aggregates play-by-play data into team-level totals."""
     results = []
-    # Identify time column dynamically
+    # Identify time column dynamically (can be seconds_elapsed or seconds)
     time_col = next((c for c in ['seconds_elapsed', 'seconds', 'timeInPeriod'] if c in pbp_wide.columns), None)
     
     for s in ['EV', 'PP', 'PK']:
@@ -120,7 +131,13 @@ def run_pipeline(game_id):
         # 1. PLAYER GAME STATS
         p_stats = on_ice_stats_by_player_strength(pbp_wide)
         p_stats['game_id'] = game_id
-        p_stats = p_stats.rename(columns={'player1id': 'player_id', 'seconds': 'toi_sec'})
+        # Rename before helper cleans the columns
+        p_stats = p_stats.rename(columns={
+            'player1id': 'player_id', 
+            'seconds': 'toi_sec',
+            'xg': 'xgf' 
+        })
+        p_stats.columns = [c.lower() for c in p_stats.columns]
         upsert_table(engine, p_stats, "player_game_stats", ['player_id', 'game_id', 'strength'])
 
         # 2. TEAM SEASON STATS
@@ -132,8 +149,11 @@ def run_pipeline(game_id):
         h_team = pbp_wide['homeTeam'].dropna().iloc[0]
         a_team = pbp_wide['awayTeam'].dropna().iloc[0]
         players_df = pd.concat([scrapeRoster(h_team, season), scrapeRoster(a_team, season)])
-        # Bio data needs the birthdate cast specifically in SQL, so we rename it here
-        players_df = players_df.rename(columns={'id': 'player_id', 'birthdate': 'birth_date', 'headshot': 'headshot_url'})
+        players_df = players_df.rename(columns={
+            'id': 'player_id', 
+            'birthdate': 'birth_date', 
+            'headshot': 'headshot_url'
+        })
         upsert_table(engine, players_df, "players", ['player_id'])
 
         # 4. STANDINGS (Standard Replace)
