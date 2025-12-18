@@ -6,18 +6,18 @@ from sqlalchemy import create_engine, text
 try:
     from scrapernhl.scraper import pipeline, on_ice_stats_by_player_strength
 except ImportError:
-    # Fallback for the PYTHONPATH method
+    # Fallback for different environment paths
     from scraper import pipeline, on_ice_stats_by_player_strength
-    
+
 sys.stdout.reconfigure(line_buffering=True)
 
 print("PYTHON STARTING...")
 print(f"Current Directory: {os.getcwd()}")
 
-# DB Connection
+# DATABASE CONNECTION
 DB_URL = os.getenv("DATABASE_URL")
 if not DB_URL:
-    print("❌ ERROR: DATABASE_URL not found in environment secrets.")
+    print("❌ ERROR: DATABASE_URL not found. Check GitHub Secrets.")
     sys.exit(1)
 
 if DB_URL.startswith("postgres://"):
@@ -29,8 +29,11 @@ def run_pipeline(game_id):
     print(f"🚀 Processing Game: {game_id}")
     
     try:
+        # SCRAPE 
         pbp_wide, players_df = pipeline(game_id)
         stats_df = on_ice_stats_by_player_strength(pbp_wide)
+        
+        # FORMAT GAME
         game_meta = {
             'game_id': game_id,
             'season_id': int(str(game_id)[:8]),
@@ -43,7 +46,8 @@ def run_pipeline(game_id):
             'venue': pbp_wide['venue'].iloc[0]
         }
         game_df = pd.DataFrame([game_meta])
-        
+
+        # PUSH TO DB
         with engine.begin() as conn:
             
             print("--- Pushing Players ---")
@@ -66,23 +70,21 @@ def run_pipeline(game_id):
 
             print("--- Pushing Player Game Stats ---")
             stats_df.to_sql("temp_stats", conn, if_exists="replace", index=False)
-            # Note: Double quotes are used for mixed-case columns from your scraper functions
+
             conn.execute(text("""
                 INSERT INTO player_game_stats (player_id, game_id, strength, toi_sec, cf, ca, gf, ga, xgf, xga)
                 SELECT "player1Id", "gameId", strength, seconds, "CF", "CA", "GF", "GA", "xG", "xGA" FROM temp_stats
                 ON CONFLICT (player_id, game_id, strength) 
                 DO UPDATE SET 
-                    toi_sec = EXCLUDED.toi_sec,
-                    cf = EXCLUDED.cf,
-                    xgf = EXCLUDED.xgf;
+                    toi_sec = EXCLUDED.toi_sec, cf = EXCLUDED.cf, xgf = EXCLUDED.xgf;
             """))
             
         print(f"✅ SUCCESS: Game {game_id} is live in Supabase.")
 
     except Exception as e:
-        print(f"❌ CRITICAL ERROR: {str(e)}")
-        sys.exit(1)
+        print(f"CRITICAL ERROR: {str(e)}")
+        sys.exit(1) 
 
 if __name__ == "__main__":
-    # Test with one game. 
+    # Test game ID
     run_pipeline(2024020123)
