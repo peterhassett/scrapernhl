@@ -62,14 +62,14 @@ def run_pipeline(game_id):
                     shoots_catches = EXCLUDED.shoots_catches;
             """))
 
-            # --- PUSH GAME STATS ---
+           # --- PUSH GAME STATS (Matched to your DB column names) ---
             stats_df['game_id'] = game_id
             stats_df.columns = [c.lower() for c in stats_df.columns]
             stats_df.to_sql("temp_stats", conn, if_exists="replace", index=False)
             conn.execute(text("""
                 INSERT INTO player_game_stats (
                     player_id, game_id, strength, toi_sec, cf, ca, ff, fa, sf, sa, gf, ga, xgf, xga, pf, pa, 
-                    giveaways_for, giveaways_against, takeaways_for, takeaways_against
+                    give_for, give_against, take_for, take_against
                 )
                 SELECT 
                     player1id, game_id, strength, seconds, cf, ca, ff, fa, sf, sa, gf, ga, xg::float, xga::float, pf, pa, 
@@ -77,8 +77,9 @@ def run_pipeline(game_id):
                 FROM temp_stats
                 ON CONFLICT (player_id, game_id, strength) DO UPDATE SET 
                     toi_sec = EXCLUDED.toi_sec, 
-                    giveaways_for = EXCLUDED.giveaways_for,
-                    takeaways_for = EXCLUDED.takeaways_for;
+                    cf = EXCLUDED.cf,
+                    give_for = EXCLUDED.give_for,
+                    take_for = EXCLUDED.take_for;
             """))
 
             # --- PUSH LEAGUE STANDINGS ---
