@@ -36,4 +36,4 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         # GitHub now knows to look for scraper.py inside /scrapernhl/
-        run: python scraper.py
+        run: python -u main_runner.py
