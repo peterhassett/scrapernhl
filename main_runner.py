@@ -76,7 +76,7 @@ def run_pipeline(game_id):
                     id, 
                     firstname_default, 
                     lastname_default, 
-                    birthdate, 
+                    birthdate::DATE, 
                     heightincentimeters, 
                     weightinpounds, 
                     shootscatches, 
