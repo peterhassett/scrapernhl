@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse 
 import pandas as pd
 from sqlalchemy import create_engine, text
 
@@ -103,4 +104,21 @@ def run_pipeline(game_id):
         sys.exit(1)
 
 if __name__ == "__main__":
-    run_pipeline(2024020123)
+    # 1. Set up arg parser
+    parser = argparse.ArgumentParser(description="NHL Game Scraper Runner")
+    
+    # 2. Add game_id argument
+    # Set a default too
+    parser.add_argument(
+        "game_id", 
+        type=int, 
+        nargs="?", 
+        default=2025020539, 
+        help="The 10-digit NHL Game ID to scrape"
+    )
+    
+    # 3. Parse the input
+    args = parser.parse_args()
+    
+    # 4. Run the pipeline with the dynamic ID
+    run_pipeline(args.game_id)
