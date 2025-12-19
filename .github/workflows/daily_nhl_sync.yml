@@ -1,5 +1,8 @@
 name: NHL Daily and Catchup Sync
+
 on:
+  schedule:
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
@@ -21,13 +24,24 @@ jobs:
           python3 -m venv .venv
           source .venv/bin/activate
 
-          # 3. Use ONLY the internal pip to install every dependency
+          # 3. Use ONLY the internal pip to install EVERY dependency
           python3 -m pip install --upgrade pip
-          python3 -m pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml polars numpy selectolax xgboost joblib
+          python3 -m pip install \
+            pandas \
+            sqlalchemy \
+            psycopg2-binary \
+            requests \
+            beautifulsoup4 \
+            lxml \
+            polars \
+            numpy \
+            selectolax \
+            xgboost \
+            joblib
 
-          # 4. CRITICAL VERIFICATION: Prove selectolax is importable right now
+          # 4. CRITICAL VERIFICATION: Prove everything is importable
           echo "--- VERIFYING ENVIRONMENT ---"
-          python3 -c "import selectolax; import xgboost; print('VERIFIED: selectolax found at', selectolax.__file__)"
+          python3 -c "import selectolax; import xgboost; import joblib; print('VERIFIED: All libraries found.')"
           
           # 5. Set PYTHONPATH to include the root (where main_runner lives)
           export PYTHONPATH=$GITHUB_WORKSPACE
