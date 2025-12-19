@@ -1,22 +1,20 @@
 import os
 import sys
-import argparse 
 import pandas as pd
 from sqlalchemy import create_engine, text
+import argparse
 
-# 1. ROBUST IMPORTS
+# Updated import to point to the subfolder package
 try:
     from scrapernhl.scraper import (
-        pipeline, on_ice_stats_by_player_strength, scrapeStandings, scrapeRoster
+        pipeline, 
+        on_ice_stats_by_player_strength, 
+        scrapeStandings, 
+        scrapeRoster
     )
-except ImportError:
-    try:
-        from scraper import (
-            pipeline, on_ice_stats_by_player_strength, scrapeStandings, scrapeRoster
-        )
-    except ImportError as e:
-        print(f"CRITICAL ERROR: Could not find scraper functions! {e}")
-        sys.exit(1)
+except ImportError as e:
+    print(f"CRITICAL ERROR: Could not find scraper functions in scrapernhl/! {e}")
+    sys.exit(1)
 
 sys.stdout.reconfigure(line_buffering=True)
 DB_URL = os.getenv("DATABASE_URL")
@@ -42,8 +40,7 @@ def upsert_table(engine, df, table_name, constraint_cols, is_accumulation=False)
     df_safe = get_safe_df(engine, df, table_name)
     df_safe.to_sql("temp_staging", engine, if_exists="replace", index=False)
     
-    cols = []
-    select_parts = []
+    cols, select_parts = [], []
     for c in df_safe.columns:
         cols.append(f'"{c}"')
         if c in ['birth_date', 'game_date']:
@@ -83,7 +80,7 @@ def get_team_stats(pbp_wide):
     return pd.DataFrame(results)
 
 def run_pipeline(game_id):
-    print(f"RUNNER: Starting Resilient Pipeline for Game {game_id}")
+    print(f"RUNNER: Starting Sync for Game {game_id}")
     try:
         pbp_wide, _ = pipeline(game_id)
         start_year = int(str(game_id)[:4])
@@ -98,27 +95,13 @@ def run_pipeline(game_id):
         upsert_table(engine, t_stats, "team_season_stats", ['team_id', 'season_id', 'strength'], is_accumulation=True)
         players_df = pd.concat([scrapeRoster(pbp_wide['homeTeam'].iloc[0], season), scrapeRoster(pbp_wide['awayTeam'].iloc[0], season)])
         upsert_table(engine, players_df, "players", ['player_id'])
-        print(f"SUCCESS: Game {game_id} fully synced.")
+        print(f"SUCCESS: Game {game_id} synced.")
     except Exception as e:
         print(f"CRITICAL ERROR: {str(e)}")
         sys.exit(1)
 
 if __name__ == "__main__":
-    # 1. Set up arg parser
-    parser = argparse.ArgumentParser(description="NHL Game Scraper Runner")
-    
-    # 2. Add game_id argument
-    # Set a default too
-    parser.add_argument(
-        "game_id", 
-        type=int, 
-        nargs="?", 
-        default=2025020539, 
-        help="The 10-digit NHL Game ID to scrape"
-    )
-    
-    # 3. Parse the input
+    parser = argparse.ArgumentParser()
+    parser.add_argument("game_id", type=int, nargs="?", default=2024020123)
     args = parser.parse_args()
-    
-    # 4. Run the pipeline with the dynamic ID
     run_pipeline(args.game_id)
