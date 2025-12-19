@@ -1,31 +1,10 @@
-name: NHL Daily and Catchup Sync
-on:
-  schedule:
-    - cron: '0 10 * * *'
-  workflow_dispatch:
-
-jobs:
-  scrape_and_sync:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install and Run
+- name: Force Install and Run
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          PYTHONPATH: ${{ github.workspace }}
         run: |
-          # 1. We force the same python interpreter for everything
-          python3 -m pip install --upgrade pip
+          PYTHON_EXE=$(which python3)
+          $PYTHON_EXE -m pip install --upgrade pip
+          $PYTHON_EXE -m pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml polars numpy selectolax xgboost joblib
           
-          # 2. We install EVERYTHING in one single line to avoid context switching
-          python3 -m pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml polars numpy selectolax xgboost joblib
-          
-          # 3. We run the script immediately after
-          python3 season_orchestrator.py
+          export PYTHONPATH=$GITHUB_WORKSPACE
+          $PYTHON_EXE season_orchestrator.py
