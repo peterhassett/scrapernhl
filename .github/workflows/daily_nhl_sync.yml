@@ -7,13 +7,14 @@ steps:
           python-version: '3.10'
           
       - name: Install Dependencies
-        run: pip install pandas sqlalchemy psycopg2-binary requests
+        run: |
+          pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml
         
       - name: Debug File List
-        run: ls -R # This helps you see if scraper.py is in the right place
+        run: ls -R
         
       - name: Run Orchestrator
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          PYTHONPATH: . 
+          PYTHONPATH: ${{ github.workspace }}
         run: python season_orchestrator.py
