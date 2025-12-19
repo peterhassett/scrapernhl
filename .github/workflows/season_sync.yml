@@ -1,12 +1,11 @@
 name: NHL Season Sync
 on:
   schedule:
-    # This runs at 10:00 UTC (5:00 AM EST) every day
     - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
-  sync:
+  scrape:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -16,13 +15,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip' # Speeds up future runs
 
-      - name: Install Dependencies
-        run: |
-          pip install pandas sqlalchemy psycopg2-binary requests
-
-      - name: Run Catch-up Sync
+      - name: Force Install and Run
         env:
-          # This pulls the Supabase URL from GitHub Secrets
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python season_orchestrator.py
+        run: |
+          # 1. Use the absolute path to the python executable
+          PYTHON_EXE=$(which python)
+          $PYTHON_EXE -m pip install --upgrade pip
+          $PYTHON_EXE -m pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml polars numpy
+          
+          # 2. Force the PYTHONPATH to the current workspace
+          export PYTHONPATH=$GITHUB_WORKSPACE
+          
+          # 3. Run using the same executable
+          $PYTHON_EXE season_orchestrator.py
