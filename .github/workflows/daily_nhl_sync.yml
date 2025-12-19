@@ -9,30 +9,34 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Build and Run
+      - name: Raw Linux Build and Execution
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          # 1. Install Linux compilation tools
-          sudo apt-get update
-          sudo apt-get install -y python3-venv python3-dev build-essential
-
-          # 2. Create and lock into a virtual environment
-          python3 -m venv .venv
-          source .venv/bin/activate
-
-          # 3. INSTALLING ONE BY ONE TO PREVENT SILENT FAILURE
-          python3 -m pip install --upgrade pip
-          python3 -m pip install selectolax
-          python3 -m pip install xgboost
-          python3 -m pip install joblib
-          python3 -m pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml polars numpy
-
-          # 4. VERIFY - THIS MUST PASS
-          echo "--- FINAL ENVIRONMENT CHECK ---"
-          python3 -c "import selectolax; print('SUCCESS: selectolax is ready')"
-          python3 -c "import xgboost; print('SUCCESS: xgboost is ready')"
+          # 1. DELETE ANY POTENTIAL CACHE OR CONFLICTING PACKAGES
+          python3 -m pip cache purge
           
-          # 5. EXECUTE
+          # 2. CREATE A BRAND NEW VIRTUAL ENVIRONMENT FROM SCRATCH
+          # Using an unusual name to ensure no collision with existing folders
+          python3 -m venv build_env
+          
+          # 3. LOCK THE BINARY PATH
+          export VENV_BIN=$GITHUB_WORKSPACE/build_env/bin
+          
+          # 4. INSTALL INDIVIDUALLY AND LOG EVERY BYTE
+          # We do not chain these with &&. Each must stand on its own.
+          $VENV_BIN/python -m pip install --upgrade pip
+          $VENV_BIN/python -m pip install selectolax
+          $VENV_BIN/python -m pip install xgboost
+          $VENV_BIN/python -m pip install joblib
+          $VENV_BIN/python -m pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml polars numpy
+          
+          # 5. THE "NO BULLSHIT" VERIFICATION
+          # This will either print the path or the entire job will FAIL RED right here
+          echo "--- STARTING SYSTEM VERIFICATION ---"
+          $VENV_BIN/python -c "import selectolax; print('VERIFIED: selectolax is at', selectolax.__file__)"
+          $VENV_BIN/python -c "import xgboost; print('VERIFIED: xgboost is at', xgboost.__file__)"
+          
+          # 6. EXECUTION
           export PYTHONPATH=$GITHUB_WORKSPACE
-          python3 -u season_orchestrator.py
+          $VENV_BIN/python -u season_orchestrator.py
