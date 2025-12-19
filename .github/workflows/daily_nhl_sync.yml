@@ -1,8 +1,8 @@
 name: NHL Season Sync
 on:
   schedule:
-    - cron: '0 10 * * *' # Runs daily at 5:00 AM EST (10:00 UTC)
-  workflow_dispatch:      # Provides the manual "Run workflow" button
+    - cron: '0 10 * * *'
+  workflow_dispatch:
 
 jobs:
   scrape:
@@ -12,15 +12,22 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip' # Speeds up future runs
 
-      - name: Install and Run Sync
+      - name: Force Install and Run
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          PYTHONPATH: ${{ github.workspace }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml
-          python season_orchestrator.py
+          # 1. Use the absolute path to the python executable
+          PYTHON_EXE=$(which python)
+          $PYTHON_EXE -m pip install --upgrade pip
+          $PYTHON_EXE -m pip install pandas sqlalchemy psycopg2-binary requests beautifulsoup4 lxml polars numpy
+          
+          # 2. Force the PYTHONPATH to the current workspace
+          export PYTHONPATH=$GITHUB_WORKSPACE
+          
+          # 3. Run using the same executable
+          $PYTHON_EXE season_orchestrator.py
