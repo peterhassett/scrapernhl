@@ -1,11 +1,18 @@
+# Welcome to ScraperNHL's documentation!
+
+ScraperNHL is a Python package designed for scraping and analyzing NHL data. This documentation will guide you through the installation, usage, and features of the package.
+
 # ScraperNHL
 
-A Python package for scraping and analyzing NHL data.
+NHL data scraping package with Expected Goals (xG) model.
 
 ## Features
-- Fetch game data, player stats, and team information from NHL websites.
-- Analyze player performance and team statistics.
-- Export data to CSV or JSON formats.
+
+- Fast NHL data scraping using `selectolax`
+- Pre-trained XGBoost Expected Goals model
+- Command-line interface (CLI) for quick data exports
+- Support for play-by-play data with xG calculations
+- Efficient data processing with `polars`
 
 ## Author 
 Max Tixador | Hockey Enthusiast | [@woumaxx](https://x.com/woumaxx) | [@HabsBrain.com](https://bsky.app/profile/habsbrain.com)
@@ -13,4 +20,4 @@ Max Tixador | Hockey Enthusiast | [@woumaxx](https://x.com/woumaxx) | [@HabsBrai
 **Contact me at: [maxtixador@gmail.com](mailto:maxtixador@gmail.com)**
 
 ## Last Updated
-December 2025
+January 2026
