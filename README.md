@@ -12,7 +12,7 @@ A comprehensive Python package for scraping and analyzing NHL data with built-in
 
 ## Features
 
-### 🏒 Comprehensive Data Scraping
+### Comprehensive Data Scraping
 - **Teams**: NHL team data, rosters, and metadata
 - **Schedule**: Team schedules with game states and scores
 - **Standings**: League standings with points and rankings
@@ -21,12 +21,12 @@ A comprehensive Python package for scraping and analyzing NHL data with built-in
 - **Draft Data**: Historical draft picks and prospects
 - **Expected Goals (xG)**: Built-in xG model for shot quality analysis
 
-### 🚀 Multiple Access Methods
+### Multiple Access Methods
 - **Python API**: Full-featured library with pandas/polars support
 - **Command-Line Interface**: Quick data exports without writing code
 - **Jupyter Notebooks**: Interactive examples and tutorials
 
-### ⚡ Performance & Design
+### Performance & Design
 - **Modular Architecture**: Fast imports (~100ms vs 2-3s)
 - **Flexible Output**: CSV, JSON, Parquet, Excel formats
 - **Backward Compatible**: Existing code works without changes
@@ -98,12 +98,12 @@ Check out the example notebooks for detailed tutorials:
 
 ## What's New in v0.1.4
 
-- 🎯 **Modular Architecture**: Codebase restructured into focused modules
-- 💻 **CLI Integration**: Command-line interface for all scraping functions
-- 📖 **Documentation Website**: Comprehensive guides and examples
-- ⚡ **Performance**: Faster imports and optimized data fetching
-- ✅ **Testing**: Unit tests for reliability
-- 📊 **Standardized Code**: Consistent style across notebooks and examples
+- **Modular Architecture**: Codebase restructured into focused modules
+- **CLI Integration**: Command-line interface for all scraping functions
+- **Documentation Website**: Comprehensive guides and examples
+- **Performance**: Faster imports and optimized data fetching
+- **Testing**: Unit tests for reliability
+- **Standardized Code**: Consistent style across notebooks and examples
 
 See [full release notes](https://maxtixador.github.io/scrapernhl/announcements/version-014/)
 
