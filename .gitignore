@@ -14,3 +14,6 @@ wheels/
 .coverage
 htmlcov/
 .tox/
+
+# MkDocs generated site
+site/
