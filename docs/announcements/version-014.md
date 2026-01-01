@@ -97,6 +97,7 @@ For now, there are no exemples for data visualization, but I plan to add some in
 
 ## Future Plans
 Looking ahead, we plan to continue enhancing the scraper with additional features and improvements. Future updates may include:
+
 - **Arena Adjusted Event Coordinates**: Implementing arena-adjusted event coordinates for more accurate data representation.
 - **Data Visualization Tools**: Adding tools for visualizing scraped data to facilitate analysis and insights.
 - **Manual Data Input**: Enabling users to manually input data for scenarios where automated scraping may not be feasible.
