@@ -1,20 +1,209 @@
-# Basic Scraping
-Several examples of how to use the `scrapernhl` package to scrape NHL data.
+# Basic Scraping Examples
+
+Comprehensive examples of how to use the `scrapernhl` package to scrape NHL data. All examples use the new modular structure introduced in v0.1.4.
+
+## Quick Start
+
+### Scraping Teams
+
+```python
+from scrapernhl.scrapers.teams import scrapeTeams
+
+# Get all NHL teams
+teams = scrapeTeams()
+print(f"Found {len(teams)} teams")
+
+# Display selected columns
+teams[['name.default', 'abbrev','id', 'placeName.default', 'commonName.default']].head(10)
+```
+
+### Scraping Schedule
+
+```python
+from scrapernhl.scrapers.schedule import scrapeSchedule
+
+# Get Montreal Canadiens schedule for current season
+schedule = scrapeSchedule("MTL", "20252026")
+print(f"MTL has {len(schedule)} games this season")
+
+# Show first 5 games with key information
+schedule[['gameDate', 'gameType', 'homeTeam.abbrev', 'homeTeam.score',
+          'awayTeam.abbrev', 'awayTeam.score', 'gameOutcome.lastPeriodType', 'gameState']].head()
+```
+
+### Scraping Standings
+
+```python
+from scrapernhl.scrapers.standings import scrapeStandings
+from datetime import datetime
+
+# Get current standings
+today = datetime.now().strftime("%Y-%m-%d")
+standings = scrapeStandings(today)
+
+print(f"Standings as of {today}:")
+standings[['teamName.default', 'teamAbbrev.default', 'gamesPlayed', 'wins', 'losses', 'otLosses', 'points', 'pointPctg', 'date']].sort_values(by='pointPctg', ascending=False).head(10)
+```
 
 ## Getting Play-by-Play Data
-```python
-from scrapernhl import scraper
 
-# Example: Scrape game data
-game_data = scraper.get_game_pbp(game_id=2023020001)
-print(game_data.head())
+```python
+from scrapernhl.scrapers.games import scrapePlays
+
+# Get play-by-play for a specific game
+game_id = 2024020001
+pbp = scrapePlays(game_id)
+
+print(f"Game {game_id} has {len(pbp)} events")
+
+# Show event types
+print("\nEvent counts:")
+pbp['typeDescKey'].value_counts()
+
+# Show first few events
+print("\nFirst 10 events:")
+pbp[['periodDescriptor.number', 'timeInPeriod', 'typeDescKey', 'details.eventOwnerTeamId', 'gameId']].head(10)
+```
+
+### With Goal Replay Data
+
+```python
+from scrapernhl.scrapers.games import scrapePlays
+
+# Include goal replay data
+pbp = scrapePlays(2024020001, addGoalReplayData=True)
+
+# Filter for goals only
+goals = pbp[pbp['eventType'] == 'goal']
+print(f"Goals scored: {len(goals)}")
 ```
 
 ## Scraping Multiple Games
+
 ```python
-# Scrape a range of games
-game_ids = [2023020001, 2023020002, 2023020003]
+from scrapernhl.scrapers.games import scrapePlays
+import pandas as pd
+
+# Scrape multiple games
+game_ids = [2024020001, 2024020002, 2024020003]
+all_plays = []
+
 for game_id in game_ids:
-    data = scraper.get_game_pbp(game_id)
-    # Process data...
+    print(f"Scraping game {game_id}...")
+    pbp = scrapePlays(game_id)
+    all_plays.append(pbp)
+
+# Combine all games
+combined_pbp = pd.concat(all_plays, ignore_index=True)
+print(f"Total events across {len(game_ids)} games: {len(combined_pbp)}")
 ```
+
+## Getting Roster Information
+
+```python
+from scrapernhl.scrapers.roster import scrapeRoster
+
+# Get Montreal Canadiens roster
+roster = scrapeRoster("MTL", "20252026")
+
+# Separate by position
+forwards = roster[roster['positionCode'].isin(['C', 'L', 'R'])]  # Forwards: Centers, Left Wings, Right Wings
+defensemen = roster[roster['positionCode'] == 'D']
+goalies = roster[roster['positionCode'] == 'G']
+
+print(f"Forwards: {len(forwards)}, Defense: {len(defensemen)}, Goalies: {len(goalies)}")
+
+print("\nForwards:")
+forwards[['id', 'firstName.default', 'lastName.default', 'positionCode', 'shootsCatches', 
+          'sweaterNumber', 'heightInInches', 'weightInPounds', 'birthDate', 'birthCountry']].assign(team="MTL").head(10)
+```
+
+## Getting Player Statistics
+
+```python
+from scrapernhl.scrapers.stats import scrapeTeamStats
+
+# Get skater stats
+skaters = scrapeTeamStats("MTL", "20252026", session=2, goalies=False)
+print("Top 10 scorers:")
+skaters.nlargest(10, 'points')[['playerId', 'firstName.default', 'lastName.default', 'positionCode', 
+                                'gamesPlayed', 'goals', 'assists', 'points']].assign(pointsPerGame=lambda df: df['points'].div(df['gamesPlayed']))
+
+# Get goalie stats
+goalies = scrapeTeamStats("MTL", "20252026", session=2, goalies=True)
+print("\nGoalie statistics:")
+goalies[['playerId', 'firstName.default', 'lastName.default', 'gamesPlayed', 'wins', 'losses',
+         'overtimeLosses', 'goalsAgainstAverage', 'savePercentage']]
+```
+
+## Getting Draft Data
+
+```python
+from scrapernhl.scrapers.draft import scrapeDraftData
+
+# Get 2025 first round picks
+draft_2025_r1 = scrapeDraftData("2025", 1)
+print(f"2025 Draft - Round 1: {len(draft_2025_r1)} picks")
+draft_2025_r1[['round', 'pickInRound', 'overallPick', 'teamAbbrev', 'firstName.default', 'lastName.default',
+               'positionCode', 'countryCode', 'height', 'weight', 'year']].head(10)
+```
+
+## Using Polars Instead of Pandas
+
+```python
+# Get data as Polars DataFrame (faster for large datasets)
+teams_pl = scrapeTeams(output_format="polars")
+print(f"Type: {type(teams_pl)}")
+print(f"Shape: {teams_pl.shape}")
+
+# Polars syntax
+teams_pl.select(['name', 'abbrev','id', 'placeName', 'commonName']).head(5)
+```
+
+## Backward Compatible Style
+
+If you have existing code, the old import style still works:
+
+```python
+# The old import style still works
+from scrapernhl import scrapeTeams, scrapeSchedule
+
+teams_old_style = scrapeTeams()
+print(f"Old import style works: {len(teams_old_style)} teams scraped")
+```
+
+## Error Handling
+
+```python
+from scrapernhl.scrapers.games import scrapePlays
+
+try:
+    pbp = scrapePlays(9999999999)  # Invalid game ID
+except Exception as e:
+    print(f"Error scraping game: {e}")
+```
+
+## Async Scraping (Advanced)
+
+For scraping multiple games efficiently:
+
+```python
+import asyncio
+from scrapernhl import scrape_game_async
+
+async def scrape_multiple_games(game_ids):
+    tasks = [scrape_game_async(game_id) for game_id in game_ids]
+    results = await asyncio.gather(*tasks)
+    return results
+
+# Run async scraping
+game_ids = [2024020001, 2024020002, 2024020003]
+results = asyncio.run(scrape_multiple_games(game_ids))
+print(f"Scraped {len(results)} games")
+```
+
+## See Also
+
+- [Advanced Examples](advanced.md) - Feature engineering, analytics
+- [Data Export](export.md) - Saving data to files
+- [API Reference](../api.md) - Complete API documentation

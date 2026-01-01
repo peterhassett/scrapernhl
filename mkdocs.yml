@@ -9,16 +9,32 @@ nav:
   - Getting Started: getting-started.md
   - API Reference: api.md
   - Examples:
+      - CLI Usage: examples/cli.md
       - Scraping Data: examples/scraping.md
-      - Expected Goals Model: examples/expected_goals.md
+      - Advanced Analytics: examples/advanced.md
+      - Data Export: examples/export.md
   - About: about.md
 
 theme:
   name: material
   palette:
-    - scheme: default
-      primary: blue
-      accent: light blue
+    # Dark theme (default)
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: white
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    # Light theme
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: grey
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+          
   features:
     - navigation.tabs
     - navigation.sections
