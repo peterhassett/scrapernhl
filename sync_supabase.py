@@ -36,45 +36,37 @@ WHITELISTS = {
 
 def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.DataFrame:
     if df.empty: return df
+    
+    # 1. Normalize Names
     df.columns = [str(c).replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
     
-    # MAPPING SHIMS: Fixes the NULL columns
+    # 2. Map Scraper Sample Keys
     if table_name == "player_stats":
-        if 'situation' in df.columns: df['strength'] = df['situation']
-        if 'teamabbrev' in df.columns and 'team' not in df.columns: df['team'] = df['teamabbrev']
-        if 'opponentabbrev' in df.columns and 'opp' not in df.columns: df['opp'] = df['opponentabbrev']
-        # Convert MM:SS to seconds if needed
-        if 'timeonice' in df.columns and ('seconds' not in df.columns or df['seconds'].isnull().all()):
-            df['seconds'] = df['timeonice'].apply(lambda x: int(x.split(':')[0])*60 + int(x.split(':')[1]) if isinstance(x,str) and ':' in x else None)
-        # Advanced Stats
-        for m in ['cf', 'ca', 'ff', 'fa', 'xg', 'xga']:
-            if f'raw_{m}' in df.columns: df[m] = df[f'raw_{m}']
+        # Mapping from your sample row
+        if 'playerid' in df.columns: df['playerid'] = df['playerid']
+        if 'positioncode' in df.columns: df['positioncode'] = df['positioncode']
+        if 'avgtimeonicepergame' in df.columns:
+            # If it's the raw 995.36 float from the sample, use it directly
+            df['avgtimeonicepergame'] = pd.to_numeric(df['avgtimeonicepergame'], errors='coerce')
 
-    elif table_name == "draft":
-        if 'roundnumber' in df.columns: df['round_number'] = df['roundnumber']
-        if 'pickinround' in df.columns: df['pick_in_round'] = df['pickinround']
-        for v in ["overallpick", "pickoverall", "draft_overall"]:
-            if v in df.columns and ("overall_pick" not in df.columns or df["overall_pick"].isnull().all()):
-                df["overall_pick"] = df[v]
+    elif table_name == "players":
+        if 'firstname_default' not in df.columns and 'firstname_default' in df.columns:
+            df['firstname_default'] = df['firstname_default']
+        if 'lastname_default' not in df.columns and 'lastname_default' in df.columns:
+            df['lastname_default'] = df['lastname_default']
 
-    elif table_name == "teams":
-        if 'conferencename' in df.columns: df['conference_name'] = df['conferencename']
-        if 'divisionname' in df.columns: df['division_name'] = df['divisionname']
-        if 'isactive' in df.columns: df['active_status'] = df['isactive']
-
-    elif table_name == "schedule":
-        if 'venuelocation' in df.columns: df['venue_location_default'] = df['venuelocation']
-
+    # 3. Whitelist Filter
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # Cast integers to stop "2.0" bigint errors
+    # 4. Cast Numeric Values
     num_pats = ['id', 'season', 'pick', 'goals', 'played', 'number', 'wins', 'points', 'shots', 'saves', 'started']
     for col in df.columns:
         if any(p in col for p in num_pats):
             if not (table_name in ["player_stats", "plays"] and col == "id"):
                 df[col] = pd.to_numeric(pd.Series(df[col]), errors='coerce').fillna(0).round().astype(np.int64)
 
+    # 5. Deduplicate
     existing_pks = [k for k in p_keys if k in df.columns]
     if existing_pks:
         df = df.dropna(subset=existing_pks).drop_duplicates(subset=existing_pks, keep='first')
@@ -100,33 +92,30 @@ def run_sync(mode="daily"):
 
     if mode == "debug":
         active_teams = active_teams[:2]
-        LOG.info(f"DEBUG MODE: Syncing only {active_teams}")
-
-    if mode == "catchup":
-        for yr in range(2020, 2026):
-            d_df = scrapeDraftRecords(str(yr))
-            if not d_df.empty:
-                d_df["year"] = yr
-                sync_table("draft", d_df, "year,overall_pick")
+        LOG.info(f"DEBUG MODE: Limited to {active_teams}")
 
     for team in active_teams:
-        LOG.info(f"Processing Franchise: {team}")
+        LOG.info(f"Syncing {team}...")
+        
+        # Rosters
         ros = scrapeRoster(team, s_str)
         if not ros.empty:
             ros['season'] = s_int
-            ros['teamabbrev'] = team # Inject team name
+            ros['teamabbrev'] = team 
             sync_table("players", ros.copy(), "id")
             sync_table("rosters", ros, "id,season")
 
+        # Stats
         for goalie in [False, True]:
             st = scraper_legacy.scrapeTeamStats(team, s_str, goalies=goalie)
             if not st.empty:
                 st = st.rename(columns={'playerId': 'playerid'})
                 st['season'] = s_int
-                st['team'] = team # Inject team name
+                st['team'] = team
                 st['id'] = st.apply(lambda r: f"{r['playerid']}_{s_int}_{goalie}_{r.get('strength','all')}", axis=1)
                 sync_table("player_stats", st, "id")
 
+        # Schedule
         sc = scrapeSchedule(team, s_str)
         if mode == "debug": sc = sc.head(3)
         sync_table("schedule", sc, "id")
