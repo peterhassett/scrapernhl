@@ -22,7 +22,7 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# EXHAUSTIVE WHITELIST
+# THE GROUND TRUTH WHITELIST
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "firstseasonid", "lastseasonid", "mostrecentteamid", "active_status", "conference_name", "division_name", "franchiseid", "logos"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "shootscatches", "heightininches", "heightincentimeters", "weightinpounds", "weightinkilograms", "birthdate", "birthcountry", "birthcity_default", "birthstateprovince_default"],
@@ -33,14 +33,6 @@ WHITELISTS = {
     "draft": ["year", "overall_pick", "round_number", "pick_in_round", "team_tricode", "player_id", "player_firstname", "player_lastname", "player_position", "player_birthcountry", "player_birthstateprovince", "player_years_pro", "amateurclubname", "amateurleague", "countrycode", "displayabbrev_default"],
     "plays": ["id", "game_id", "event_id", "period", "period_type", "time_in_period", "time_remaining", "situation_code", "home_team_defending_side", "event_type", "type_desc_key", "x_coord", "y_coord", "zone_code", "ppt_replay_url"]
 }
-
-def toi_to_decimal(toi_str):
-    if pd.isna(toi_str) or not isinstance(toi_str, str) or ':' not in toi_str:
-        return None
-    try:
-        m, s = map(int, toi_str.split(':'))
-        return round(m + (s / 60.0), 2)
-    except: return None
 
 def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.DataFrame:
     if df.empty: return df
@@ -62,16 +54,22 @@ def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.Da
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # 5. Type Casting
+    # 5. Type Casting (FIX FOR TYPEERROR)
+    # We use apply() on the Series to avoid the pd.to_numeric scalar crash
     num_pats = ['id', 'season', 'pick', 'goals', 'played', 'number', 'wins', 'points', 'shots', 'saves']
     for col in df.columns:
         if any(p in col for p in num_pats):
             if not (table_name in ["player_stats", "plays"] and col == "id"):
-                df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
+                # Use series-specific conversion to force 1D array behavior
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                # Fill NaN with 0 only for non-null primary keys if necessary, or keep nullable Int64
+                df[col] = df[col].round().astype('Int64')
+        
         if 'timeonice' in col:
-            df[col] = df[col].apply(toi_to_decimal)
+            # Element-wise check to prevent scalar crash
+            df[col] = df[col].apply(lambda x: round(int(x.split(':')[0]) + (int(x.split(':')[1])/60.0), 2) if isinstance(x, str) and ':' in x else None)
 
-    # 6. PK SAFETY CHECK (Fixes KeyError and 21000/23502)
+    # 6. PK SAFETY CHECK
     existing_pks = [k for k in p_keys if k in df.columns]
     if existing_pks:
         df = df.dropna(subset=existing_pks)
@@ -83,7 +81,8 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
     ready = clean_and_validate(df, table_name, p_key_str.split(','))
     if ready.empty: return
     try:
-        supabase.table(table_name).upsert(ready.to_dict(orient="records"), on_conflict=p_key_str).execute()
+        data = ready.to_dict(orient="records")
+        supabase.table(table_name).upsert(data, on_conflict=p_key_str).execute()
         LOG.info(f"Synced {len(ready)} to {table_name}")
     except Exception as e:
         LOG.error(f"Sync failed for {table_name}: {e}")
@@ -93,7 +92,7 @@ def run_sync(mode="daily"):
     sync_table("teams", scrapeTeams(source="records"), "id")
     sync_table("standings", scrapeStandings(), "date,teamabbrev_default")
     
-    # Active Teams
+    # Discovery
     teams_clean = clean_and_validate(scrapeTeams(source="records"), "teams", ["id"])
     active_teams = teams_clean[teams_clean['lastseasonid'].isna()]['teamabbrev'].dropna().unique().tolist()
 
@@ -115,18 +114,21 @@ def run_sync(mode="daily"):
             for goalie in [False, True]:
                 st = scraper_legacy.scrapeTeamStats(team, s_str, goalies=goalie)
                 if not st.empty:
-                    st['playerid'] = st['playerId']
+                    # RENAME Keys to match WHITELIST
+                    st = st.rename(columns={'playerId': 'playerid'})
                     st['season'] = s_int
                     st['id'] = st.apply(lambda r: f"{r['playerid']}_{s_int}_{goalie}_{r.get('strength','all')}", axis=1)
+                    
+                    # Parent safety
                     p_saf = st[['playerid']].rename(columns={'playerid': 'id'}).drop_duplicates()
                     sync_table("players", p_saf, "id")
                     sync_table("player_stats", st, "id")
 
             sc = scrapeSchedule(team, s_str)
-            for gid in sc['id'].head(10).tolist():
+            for gid in sc['id'].head(5).tolist():
                 pl = scrapePlays(gid)
                 if not pl.empty:
-                    pl['id'] = pl.apply(lambda r: f"{gid}_{r.get('eventid','0')}_{r.get('period','1')}", axis=1)
+                    pl['id'] = pl.apply(lambda r: f"{gid}_{r.get('eventid', '0')}_{r.get('period', '1')}", axis=1)
                     pl['game_id'] = gid
                     sync_table("plays", pl, "id")
 
