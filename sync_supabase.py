@@ -18,19 +18,24 @@ from scrapernhl import (
     on_ice_stats_by_player_strength
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Configuration for Logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 LOG = logging.getLogger(__name__)
 
-# Supabase Connection
+# Supabase Connection Initialization
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 if not url or not key:
-    LOG.error("Missing SUPABASE_URL or SUPABASE_KEY environment variables.")
+    LOG.error("Environment variables SUPABASE_URL or SUPABASE_KEY are missing.")
     sys.exit(1)
 
 supabase: Client = create_client(url, key)
 
-# --- MASTER WHITELISTS ---
+# --- MASTER WHITELISTS (EXPLICIT) ---
 WHITELISTS = {
     "teams": [
         "id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", 
@@ -83,6 +88,7 @@ WHITELISTS = {
     ]
 }
 
+# Values that must be transmitted as Integers to avoid 400 syntax errors
 STRICT_INTS = [
     "id", "playerid", "season", "game_id", "event_id", "hometeam_id", "awayteam_id", 
     "franchiseid", "player_id", "firstseasonid", "lastseasonid", "mostrecentteamid",
@@ -90,22 +96,37 @@ STRICT_INTS = [
 ]
 
 def terminal_cast(val, col, table):
+    """Rigid type enforcement for PostgreSQL compatibility."""
     if pd.isna(val) or val is None:
         return None
+    
+    # 1. Force Boolean for 'activestatus' (Fixes the 400 Bad Request error)
+    if col == "activestatus":
+        if isinstance(val, bool): return val
+        return str(val).lower() in ['true', '1', 'y', '1.0']
+
+    # 2. Strip decimals from BIGINT/Integer columns
     if col in STRICT_INTS:
         if not (table in ["player_stats", "plays"] and col == "id"):
             try:
                 return int(round(float(val)))
-            except:
+            except (ValueError, TypeError):
                 return 0
+    
+    # 3. Ensure analytics/counting metrics are native Python floats
     if isinstance(val, (float, np.floating, int, np.integer)):
         return float(val)
+        
     return str(val)
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
+    """Prepares dataframe for JSON serialization and Upsert."""
     if df.empty: return []
+    
+    # Standardize column headers
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
+    # Handle specific analytic field mappings
     if table_name == "player_stats":
         if 'player1id' in df.columns: df['playerid'] = df['player1id']
         if 'eventteam' in df.columns: df['team'] = df['eventteam']
@@ -117,6 +138,7 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     records = []
     for row in df.to_dict(orient="records"):
         clean_row = {k: terminal_cast(v, k, table_name) for k, v in row.items()}
+        # Date scrub for 0.0 artifacts
         for d_col in ['gamedate', 'birthdate', 'starttimeutc', 'date']:
             if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
                 clean_row[d_col] = None
@@ -124,26 +146,35 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     return records
 
 def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
+    """Final deduplication and Supabase API execution."""
     records = clean_and_validate(df, table_name)
     if not records: return
+    
+    # Resolve 21000 Error: deduplicate within the current batch
+    if "," not in p_key_str:
+        temp_df = pd.DataFrame(records)
+        if not temp_df.empty:
+            temp_df = temp_df.drop_duplicates(subset=[p_key_str], keep='last')
+            records = temp_df.to_dict(orient="records")
+
     try:
         supabase.table(table_name).upsert(records, on_conflict=p_key_str).execute()
-        LOG.info(f"Synced {len(records)} to {table_name}")
+        LOG.info(f"Successfully synced {len(records)} records to '{table_name}'.")
     except Exception as e:
-        LOG.error(f"Sync failed for {table_name}: {e}")
+        LOG.error(f"Sync failed for table '{table_name}': {e}")
 
 def run_sync(mode="daily"):
     S_STR, S_INT = "20252026", 20252026
-    LOG.info(f"STARTING SYNC: Mode={mode} | Season={S_STR}")
+    LOG.info(f"--- NHL SUPABASE SYNC START | Mode: {mode} ---")
     
-    # 1. Teams Sync with Safe Flattening
+    # 1. Teams Sync (with logic to flatten nested 'teams' list)
     raw_teams = scrapeTeams(source="records")
     flattened_data = []
     for _, row in raw_teams.iterrows():
         base = row.to_dict()
         nested_list = base.get('teams', [])
         
-        # Initialize defaults for flattened fields
+        # Explicitly initialize flattened keys
         base['activestatus'] = False
         base['conferencename'] = None
         base['divisionname'] = None
@@ -153,16 +184,10 @@ def run_sync(mode="daily"):
             team_info = nested_list[0]
             if isinstance(team_info, dict):
                 base['activestatus'] = True if team_info.get('active') == 'Y' else False
-                
-                # Safe Get for nested objects that might be None
                 conf = team_info.get('conference')
-                if isinstance(conf, dict):
-                    base['conferencename'] = conf.get('name')
-                
+                if isinstance(conf, dict): base['conferencename'] = conf.get('name')
                 div = team_info.get('division')
-                if isinstance(div, dict):
-                    base['divisionname'] = div.get('name')
-                
+                if isinstance(div, dict): base['divisionname'] = div.get('name')
                 base['logos'] = str(team_info.get('logos', []))
         
         flattened_data.append(base)
@@ -177,9 +202,9 @@ def run_sync(mode="daily"):
         all_teams = teams_df[teams_df['activestatus'] == True]['teamabbrev'].unique().tolist()
     
     for team in all_teams:
-        LOG.info(f"--- Processing {team} ---")
+        LOG.info(f"*** Processing Team: {team} ***")
         
-        # 2. Roster/Players
+        # 2. Roster and Player Info
         ros = scrapeRoster(team, S_STR)
         if not ros.empty:
             ros.columns = [str(c).replace('.', '_').lower() for c in ros.columns]
@@ -191,7 +216,7 @@ def run_sync(mode="daily"):
         # 3. Schedule Sync
         schedule_raw = scrapeSchedule(team, S_STR)
         schedule_raw.columns = [str(c).replace('.', '_').lower() for c in schedule_raw.columns]
-        schedule_raw = schedule_raw[schedule_raw['gametype'] == 2]
+        schedule_raw = schedule_raw[schedule_raw['gametype'] == 2] # Regular Season
         
         if mode == "daily":
             cutoff = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
@@ -199,7 +224,7 @@ def run_sync(mode="daily"):
         
         sync_table("schedule", schedule_raw, "id")
 
-        # 4. Detailed Game Stats
+        # 4. Game-by-Game Processing for Analytics
         completed = schedule_raw[schedule_raw['gamestate'].isin(['FINAL', 'OFF'])]
         game_ids = completed['id'].tolist()
         
@@ -209,17 +234,19 @@ def run_sync(mode="daily"):
         all_game_stats = []
         for gid in game_ids:
             try:
-                LOG.info(f"Processing Game {gid}...")
+                LOG.info(f"Extracting PBP for Game ID: {gid}")
                 pbp = scrape_game(gid)
                 pbp = engineer_xg_features(pbp)
                 pbp = predict_xg_for_pbp(pbp)
                 
+                # Dynamic registry for players found in PBP but not official rosters
                 u_p = pbp[['player1Id', 'player1Name']].dropna().drop_duplicates()
                 mini_p = pd.DataFrame({'id': u_p['player1Id'], 'firstname_default': u_p['player1Name']})
                 sync_table("players", mini_p, "id")
 
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
+                # Perform manual counting stat merges
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -231,18 +258,26 @@ def run_sync(mode="daily"):
                 stats = stats.merge(a2.rename(columns={'player3Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
                 all_game_stats.append(stats)
             except Exception as e:
-                LOG.error(f"Failed Game {gid}: {e}")
+                LOG.error(f"Processing failed for Game {gid}: {e}")
 
         if all_game_stats:
+            # 5. Seasonal Aggregation of Processed Game Stats
             combined = pd.concat(all_game_stats)
-            metrics = ['seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2']
+            metrics = [
+                'seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 
+                'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2'
+            ]
             sum_map = {m: 'sum' for m in metrics if m in combined.columns}
+            
             agg = combined.groupby(['player1Id', 'eventTeam', 'strength']).agg(sum_map).reset_index()
             agg['assists'] = agg.get('a1', 0) + agg.get('a2', 0)
             agg['points'] = agg.get('goals', 0) + agg['assists']
             agg['season'] = S_INT
             agg['gamesplayed'] = len(game_ids)
+            
+            # Unique Composite ID for the player_stats table
             agg['id'] = agg.apply(lambda r: f"{int(float(r['player1Id']))}_{S_INT}_{r['strength']}", axis=1)
+            
             sync_table("player_stats", agg, "id")
 
 if __name__ == "__main__":
