@@ -5,13 +5,12 @@ import pandas as pd
 import numpy as np
 from supabase import create_client, Client
 
-# New Modular Scrapers
+# Modular Scrapers
 from scrapernhl.scrapers.teams import scrapeTeams
 from scrapernhl.scrapers.roster import scrapeRoster
 from scrapernhl.scrapers.schedule import scrapeSchedule
 from scrapernhl import scrape_game, engineer_xg_features, predict_xg_for_pbp, on_ice_stats_by_player_strength
 
-# Configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOG = logging.getLogger(__name__)
 
@@ -19,7 +18,6 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# Ground Truth Whitelist
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
@@ -28,10 +26,10 @@ WHITELISTS = {
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
-# Your "True INT" Master List
+# Explicitly mapping columns that Postgres expects as BIGINT/INT
 TRUE_INTS = {
     "player_stats": ["playerid", "season", "gamesplayed", "goals", "assists", "points", "shots"],
-    "schedule": ["season", "gametype", "hometeam_id", "hometeam_score", "awayteam_id", "awayteam_score"],
+    "schedule": ["id", "season", "gametype", "hometeam_id", "hometeam_score", "awayteam_id", "awayteam_score"],
     "players": ["id"],
     "rosters": ["id", "season", "sweaternumber"],
     "teams": ["id"]
@@ -39,25 +37,25 @@ TRUE_INTS = {
 
 def finalize_type(val, col, table):
     """
-    Final stage casting. Converts to native Python types.
-    Strictly ignores decimals for the user-defined TRUE_INTS.
+    Ensures absolute type safety. 
+    Strips decimals from anything in TRUE_INTS or any column ending in 'id'.
     """
     if pd.isna(val) or val is None:
         return None
     
-    # Check if this specific column in this table is a True INT
-    is_true_int = col in TRUE_INTS.get(table, [])
-    
-    # General rule: 'id' columns (except for player_stats composite) are usually ints
-    if col == "id" and table != "player_stats":
-        is_true_int = True
+    # Logic: If it's a known INT or looks like an ID (except for player_stats.id which is a string)
+    is_strict_int = col in TRUE_INTS.get(table, [])
+    if col.endswith('id') and not (table == "player_stats" and col == "id"):
+        is_strict_int = True
+    if col in ["season", "sweaternumber", "goals", "assists", "shots", "points", "gamesplayed"]:
+        is_strict_int = True
 
     try:
-        if is_true_int:
-            # Force "1.0" -> 1 (This satisfies BIGINT if you ever go back)
+        if is_strict_int:
+            # The 'Nuclear' cast to remove .0
             return int(round(float(val)))
         
-        # If not a strict INT, treat as float/string for NUMERIC columns
+        # Everything else is NUMERIC/Float or String
         if isinstance(val, (float, np.floating, int, np.integer)):
             return float(val)
         
@@ -68,25 +66,22 @@ def finalize_type(val, col, table):
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
     
-    # 1. Normalize headers (homeTeam.id -> hometeam_id)
+    # Normalize headers
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
-    # 2. Map internal field names
     if table_name == "player_stats":
         if 'player1id' in df.columns: df['playerid'] = df['player1id']
         if 'eventteam' in df.columns: df['team'] = df['eventteam']
 
-    # 3. Whitelist check
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # 4. Nuclear Clean: Bypass Pandas dict serialization
     raw_dicts = df.to_dict(orient="records")
     clean_records = []
     for record in raw_dicts:
         clean_row = {k: finalize_type(v, k, table_name) for k, v in record.items()}
         
-        # Date cleanup
+        # Date and Time cleanup to prevent float-strings
         for d_col in ['gamedate', 'birthdate', 'starttimeutc']:
             if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
                 clean_row[d_col] = None
@@ -137,7 +132,7 @@ def run_sync(mode="daily"):
                 pbp = predict_xg_for_pbp(pbp)
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Merge counts
+                # Merge individual counting stats
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
