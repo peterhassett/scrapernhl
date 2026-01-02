@@ -6,7 +6,6 @@ from datetime import datetime
 from supabase import create_client, Client
 from scrapernhl import scraper_legacy
 
-# Initialize Supabase
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
@@ -21,10 +20,10 @@ def get_actual_columns(table_name: str) -> list:
         cols = list(res.data[0].keys()) if res.data else []
         PHYSICAL_SCHEMA_CACHE[table_name] = cols
         return cols
-    except: return []
+    except:
+        return []
 
 def toi_to_decimal(toi_str):
-    """Converts MM:SS string to decimal minutes (Numeric)."""
     if pd.isna(toi_str) or not isinstance(toi_str, str) or ':' not in toi_str:
         return None
     try:
@@ -39,25 +38,28 @@ def completist_prepare(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
     # 1. Flatten Names
     df.columns = [c.replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
     
-    # 2. CONVERT TOI TO NUMERIC
+    # 2. Convert TOI
     if 'avgtimeonicepergame' in df.columns:
         df['avgtimeonicepergame'] = df['avgtimeonicepergame'].apply(toi_to_decimal)
 
-    # 3. DROP ARRAYS/DICTS (Bypasses TypeError)
-    cols_to_drop = []
+    # 3. TYPE PROTECTION: Drop any column that contains non-scalar objects (Fixes TypeError)
+    # We check if the data type of the column is 'object' and then look for lists/dicts
     for col in df.columns:
-        non_null = df[col].dropna()
-        if not non_null.empty and isinstance(non_null.iloc[0], (list, dict)):
-            cols_to_drop.append(col)
-    df = df.drop(columns=cols_to_drop)
+        if df[col].dtype == 'object':
+            # Check a non-null sample for complex types
+            sample = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+            if isinstance(sample, (list, dict, tuple)):
+                df = df.drop(columns=[col])
 
     # 4. Targeted Numeric Casting
     num_patterns = ['id', 'season', 'number', 'played', 'goals', 'assists', 'points', 'wins', 'pick']
     for col in df.columns:
         if any(pat in col for pat in num_patterns):
-            df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
+            # Final safety: only numericize if the remaining data isn't a string (like headshot URLs)
+            if not pd.api.types.is_string_dtype(df[col]):
+                df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
 
-    # 5. JSON Compliance & Intersection Check
+    # 5. Clean and Intersection
     df = df.replace({np.nan: None, np.inf: None, -np.inf: None})
     db_cols = get_actual_columns(table_name)
     if db_cols:
@@ -70,12 +72,12 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key: str):
     if df_ready.empty: return
     try:
         supabase.table(table_name).upsert(df_ready.to_dict(orient="records"), on_conflict=p_key).execute()
-        print(f"Successfully synced {len(df_ready)} rows to {table_name}")
+        print(f"Synced {len(df_ready)} rows to {table_name}")
     except Exception as e:
         print(f"Failed {table_name}: {e}")
 
 def run_sync(mode="daily"):
-    print(f"Starting FINAL COMPLETIST sync: {mode}")
+    print(f"Starting COMPLETIST sync: {mode}")
     current_season = "20242025"
     
     from scrapernhl.scrapers.teams import scrapeTeams
@@ -84,8 +86,7 @@ def run_sync(mode="daily"):
     
     teams_clean = completist_prepare(teams_raw.copy(), "teams")
     active_teams = teams_clean[teams_clean['lastseasonid'].isna()]['teamabbrev'].dropna().unique().tolist()
-    print(f"Processing {len(active_teams)} active franchises.")
-
+    
     if mode == "catchup":
         from scrapernhl.scrapers.draft import scrapeDraftData
         for year in range(2020, 2026):
