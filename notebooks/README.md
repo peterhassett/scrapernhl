@@ -2,7 +2,7 @@
 
 Interactive Jupyter notebooks demonstrating the `scrapernhl` package functionality.
 
-## 📓 Notebooks
+## Notebooks
 
 ### 1. [Basic Scraping](01_basic_scraping.ipynb)
 Introduction to scraping NHL data:
@@ -31,7 +31,7 @@ Exporting data to various formats:
 - Custom formatting
 - Using Polars for fast exports
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Installation
 
@@ -62,7 +62,7 @@ jupyter lab
 
 Then navigate to the `notebooks/` directory and open any notebook.
 
-## 📋 Requirements
+## Requirements
 
 **Basic scraping (notebooks 1 & 3):**
 - pandas or polars
@@ -78,19 +78,19 @@ Then navigate to the `notebooks/` directory and open any notebook.
 - openpyxl (for Excel export)
 - pyarrow or fastparquet (for Parquet export)
 
-## 🧪 Testing Examples
+## Testing Examples
 
 These notebooks serve dual purposes:
 1. **Documentation**: Learn how to use the package
 2. **Testing**: Verify that all features work correctly
 
 Run all cells in each notebook to confirm:
-- ✅ All imports work
-- ✅ All scrapers return data
-- ✅ All export methods succeed
-- ✅ Advanced analytics calculate correctly
+- All imports work
+- All scrapers return data
+- All export methods succeed
+- Advanced analytics calculate correctly
 
-## 🔄 Modular Structure
+## Modular Structure
 
 All notebooks use the new modular structure introduced in v0.1.4:
 
@@ -104,14 +104,14 @@ from scrapernhl import scrape_game, engineer_xg_features
 from scrapernhl import scrapeTeams, scrapePlays
 ```
 
-## 📖 See Also
+## See Also
 
 - [Documentation](../docs/) - Full documentation
 - [API Reference](../docs/api.md) - Complete function reference
 - [Examples](../docs/examples/) - Code examples in markdown
 - [Getting Started](../docs/getting-started.md) - Quick start guide
 
-## 🤝 Contributing
+## Contributing
 
 Found an issue or want to add an example? Contributions welcome!
 
@@ -120,6 +120,6 @@ Found an issue or want to add an example? Contributions welcome!
 3. Add your notebook or improvements
 4. Submit a pull request
 
-## 📝 License
+## License
 
 See [LICENSE](../docs/LICENSE) for details.
