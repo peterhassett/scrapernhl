@@ -26,42 +26,36 @@ WHITELISTS = {
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
-# Explicitly mapping columns that Postgres expects as BIGINT/INT
-TRUE_INTS = {
-    "player_stats": ["playerid", "season", "gamesplayed", "goals", "assists", "points", "shots"],
-    "schedule": ["id", "season", "gametype", "hometeam_id", "hometeam_score", "awayteam_id", "awayteam_score"],
-    "players": ["id"],
-    "rosters": ["id", "season", "sweaternumber"],
-    "teams": ["id"]
-}
+# These are the fields the Supabase API (Request Side) expects to be clean integers
+STRICT_INT_FIELDS = [
+    "playerid", "season", "gamesplayed", "goals", "assists", "points", "shots",
+    "gametype", "hometeam_id", "hometeam_score", "awayteam_id", "awayteam_score",
+    "id", "sweaternumber"
+]
 
-def finalize_type(val, col, table):
+def clean_for_request(val, col, table):
     """
-    Ensures absolute type safety. 
-    Strips decimals from anything in TRUE_INTS or any column ending in 'id'.
+    Final filter before JSON serialization. 
+    This is what ensures the REQUEST is valid.
     """
     if pd.isna(val) or val is None:
         return None
     
-    # Logic: If it's a known INT or looks like an ID (except for player_stats.id which is a string)
-    is_strict_int = col in TRUE_INTS.get(table, [])
-    if col.endswith('id') and not (table == "player_stats" and col == "id"):
-        is_strict_int = True
-    if col in ["season", "sweaternumber", "goals", "assists", "shots", "points", "gamesplayed"]:
-        is_strict_int = True
-
-    try:
-        if is_strict_int:
-            # The 'Nuclear' cast to remove .0
-            return int(round(float(val)))
-        
-        # Everything else is NUMERIC/Float or String
-        if isinstance(val, (float, np.floating, int, np.integer)):
-            return float(val)
-        
-        return str(val)
-    except:
-        return str(val)
+    # 1. Force strict integers for identified fields
+    # Note: player_stats.id is a string (e.g. '847..._2024_5v5'), so we skip it
+    if col in STRICT_INT_FIELDS:
+        if not (table == "player_stats" and col == "id"):
+            try:
+                return int(round(float(val)))
+            except:
+                return 0
+    
+    # 2. Force floats for everything else numeric (xG, seconds, etc.)
+    if isinstance(val, (float, np.floating, int, np.integer)):
+        return float(val)
+    
+    # 3. Everything else (Strings/Dates)
+    return str(val)
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
@@ -76,16 +70,19 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    raw_dicts = df.to_dict(orient="records")
+    # Convert to list of dicts - THIS IS THE POINT OF NO RETURN FOR PANDAS
+    raw_records = df.to_dict(orient="records")
     clean_records = []
-    for record in raw_dicts:
-        clean_row = {k: finalize_type(v, k, table_name) for k, v in record.items()}
+    
+    for record in raw_records:
+        # Manually rebuild the record with Python native types
+        clean_row = {k: clean_for_request(v, k, table_name) for k, v in record.items()}
         
-        # Date and Time cleanup to prevent float-strings
+        # Guard against '0.0' dates which kill the request
         for d_col in ['gamedate', 'birthdate', 'starttimeutc']:
-            if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
+            if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan", "None"]:
                 clean_row[d_col] = None
-        
+                
         clean_records.append(clean_row)
     
     return clean_records
@@ -116,6 +113,7 @@ def run_sync(mode="daily"):
         sync_table("schedule", schedule_raw, "id")
 
         # 2. Player Stats
+        # Use localized normalization for filtering
         sched_norm = schedule_raw.copy()
         sched_norm.columns = [str(c).replace('.', '_').lower() for c in sched_norm.columns]
         completed = sched_norm[sched_norm['gamestate'].isin(['FINAL', 'OFF'])]
@@ -132,7 +130,7 @@ def run_sync(mode="daily"):
                 pbp = predict_xg_for_pbp(pbp)
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Merge individual counting stats
+                # Manual counting
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
