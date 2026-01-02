@@ -22,7 +22,6 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# EXHAUSTIVE WHITELIST - MATCHES SQL EXACTLY
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "firstseasonid", "lastseasonid", "mostrecentteamid", "active_status", "conference_name", "division_name", "franchiseid", "logos"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "shootscatches", "heightininches", "heightincentimeters", "weightinpounds", "weightinkilograms", "birthdate", "birthcountry", "birthcity_default", "birthstateprovince_default"],
@@ -47,8 +46,8 @@ def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.Da
     df.columns = [c.replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
     
     if table_name == "draft":
-        variants = ["overallpick", "pickoverall", "draft_overall", "overall_pick_number", "pick_overall"]
-        for v in variants:
+        # Records API uses these variants; map them to our 'overall_pick' primary key
+        for v in ["overallpick", "pickoverall", "draft_overall", "overall_pick_number", "pick_overall"]:
             if v in df.columns and "overall_pick" not in df.columns:
                 df["overall_pick"] = df[v]
 
@@ -58,16 +57,16 @@ def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.Da
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    num_pats = ['id', 'season', 'pick', 'goals', 'played', 'number', 'wins', 'points', 'shots', 'saves', 'started']
+    # Aggressive casting to prevent 22P02 (bigint syntax error)
+    num_pats = ['id', 'season', 'pick', 'goals', 'played', 'number', 'wins', 'points', 'shots', 'saves', 'started', 'type']
     for col in df.columns:
         if any(p in col for p in num_pats):
             if not (table_name in ["player_stats", "plays"] and col == "id"):
-                # Vectorized numeric cast
-                df[col] = pd.to_numeric(pd.Series(df[col]), errors='coerce').round().astype('Int64')
+                # to_numeric then round avoids the "2.0" string issue
+                df[col] = pd.to_numeric(pd.Series(df[col]), errors='coerce').fillna(0).round().astype(np.int64)
         if 'timeonice' in col:
             df[col] = df[col].apply(toi_to_decimal)
 
-    # DEDUPLICATION & PK CHECK
     existing_pks = [k for k in p_keys if k in df.columns]
     if existing_pks:
         df = df.dropna(subset=existing_pks)
@@ -79,7 +78,8 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
     ready = clean_and_validate(df, table_name, p_key_str.split(','))
     if ready.empty: return
     try:
-        supabase.table(table_name).upsert(ready.to_dict(orient="records"), on_conflict=p_key_str).execute()
+        data = ready.to_dict(orient="records")
+        supabase.table(table_name).upsert(data, on_conflict=p_key_str).execute()
         LOG.info(f"Synced {len(ready)} to {table_name}")
     except Exception as e:
         LOG.error(f"Sync failed for {table_name}: {e}")
@@ -100,7 +100,7 @@ def run_sync(mode="daily"):
                 sync_table("draft", d_df, "year,overall_pick")
 
         for team in active_teams:
-            LOG.info(f"Syncing: {team}")
+            LOG.info(f"Syncing {team}...")
             ros = scrapeRoster(team, s_str)
             if not ros.empty:
                 ros['season'] = s_int
@@ -113,15 +113,15 @@ def run_sync(mode="daily"):
                     st = st.rename(columns={'playerId': 'playerid'})
                     st['season'] = s_int
                     st['id'] = st.apply(lambda r: f"{r['playerid']}_{s_int}_{goalie}_{r.get('strength','all')}", axis=1)
-                    
                     p_saf = st[['playerid']].rename(columns={'playerid': 'id'}).drop_duplicates()
                     sync_table("players", p_saf, "id")
                     sync_table("player_stats", st, "id")
 
-            # SCHEDULE SYNCED BEFORE PLAYS (Fixes 23503)
+            # SCHEDULE MUST BE SYNCED AND VALID BEFORE PLAYS LOOP
             sc = scrapeSchedule(team, s_str)
             sync_table("schedule", sc, "id")
-            for gid in sc['id'].head(10).tolist():
+            
+            for gid in sc['id'].tolist():
                 pl = scrapePlays(gid)
                 if not pl.empty:
                     pl['id'] = pl.apply(lambda r: f"{gid}_{r.get('eventid', '0')}_{r.get('period', '1')}", axis=1)
