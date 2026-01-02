@@ -1,89 +1,118 @@
--- Clean start
+-- 1. CLEANUP (DROP TABLES)
+-- We drop in reverse order of dependencies to avoid foreign key errors
+DROP TABLE IF EXISTS standings CASCADE;
+DROP TABLE IF EXISTS draft CASCADE;
 DROP TABLE IF EXISTS plays CASCADE;
 DROP TABLE IF EXISTS player_stats CASCADE;
-DROP TABLE IF EXISTS standings CASCADE;
 DROP TABLE IF EXISTS schedule CASCADE;
 DROP TABLE IF EXISTS rosters CASCADE;
 DROP TABLE IF EXISTS players CASCADE;
 DROP TABLE IF EXISTS teams CASCADE;
-DROP TABLE IF EXISTS draft CASCADE;
 
--- 1. TEAMS
+-- 2. TEAMS TABLE
 CREATE TABLE teams (
     id BIGINT PRIMARY KEY,
-    fullname TEXT,
-    teamabbrev TEXT UNIQUE,
-    teamcommonname TEXT,
-    teamplacename TEXT,
-    firstseasonid BIGINT,
-    lastseasonid BIGINT,
-    mostrecentteamid BIGINT,
-    active_status BOOLEAN,
-    conference_name TEXT,
-    division_name TEXT,
-    franchiseid BIGINT,
+    fullName TEXT,
+    teamAbbrev TEXT UNIQUE,
+    teamCommonName TEXT,
+    teamPlaceName TEXT,
+    activeStatus BOOLEAN, -- API: activeStatus
+    firstSeasonId BIGINT,
+    lastSeasonId BIGINT,
+    mostRecentTeamId BIGINT,
+    conferenceName TEXT,
+    divisionName TEXT,
+    franchiseId BIGINT,
     logos TEXT,
-    scrapedon TIMESTAMPTZ DEFAULT now()
+    scrapedOn TIMESTAMPTZ DEFAULT now()
 );
 
--- 2. PLAYERS
+-- 3. PLAYERS TABLE
 CREATE TABLE players (
     id BIGINT PRIMARY KEY,
-    firstname_default TEXT,
-    lastname_default TEXT,
+    firstName_default TEXT, -- API: firstName.default (dot becomes underscore)
+    lastName_default TEXT,
     headshot TEXT,
-    positioncode TEXT,
-    shootscatches TEXT,
-    heightininches NUMERIC, -- Adjusted to NUMERIC for Pandas compatibility
-    heightincentimeters NUMERIC,
-    weightinpounds NUMERIC,
-    weightinkilograms NUMERIC,
-    birthdate DATE,
-    birthcountry TEXT,
-    birthcity_default TEXT,
-    birthstateprovince_default TEXT,
-    scrapedon TIMESTAMPTZ DEFAULT now()
+    positionCode TEXT,
+    shootsCatches TEXT,
+    heightInInches NUMERIC,
+    heightInCentimeters NUMERIC,
+    weightInPounds NUMERIC,
+    weightInKilograms NUMERIC,
+    birthDate DATE,
+    birthCountry TEXT,
+    birthCity_default TEXT,
+    birthStateProvince_default TEXT,
+    scrapedOn TIMESTAMPTZ DEFAULT now()
 );
 
--- 3. ROSTERS
+-- 4. ROSTERS TABLE
 CREATE TABLE rosters (
     id BIGINT REFERENCES players(id),
     season BIGINT NOT NULL,
-    teamabbrev TEXT REFERENCES teams(teamabbrev),
-    sweaternumber NUMERIC, -- Adjusted to NUMERIC
-    positioncode TEXT,
-    scrapedon TIMESTAMPTZ DEFAULT now(),
+    teamAbbrev TEXT REFERENCES teams(teamAbbrev),
+    sweaterNumber NUMERIC,
+    positionCode TEXT,
+    scrapedOn TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (id, season)
 );
 
--- 4. PLAYER_STATS
+-- 5. SCHEDULE TABLE
+CREATE TABLE schedule (
+    id BIGINT PRIMARY KEY,
+    season BIGINT,
+    gameDate DATE,
+    gameType NUMERIC,
+    gameState TEXT, -- API: gameState
+    homeTeam_id BIGINT,
+    homeTeam_abbrev TEXT,
+    homeTeam_score NUMERIC,
+    homeTeam_commonName_default TEXT,
+    homeTeam_placeName_default TEXT,
+    homeTeam_logo TEXT,
+    awayTeam_id BIGINT,
+    awayTeam_abbrev TEXT,
+    awayTeam_score NUMERIC,
+    awayTeam_commonName_default TEXT,
+    awayTeam_placeName_default TEXT,
+    awayTeam_logo TEXT,
+    venue_default TEXT,
+    venue_location_default TEXT,
+    startTimeUTC TIMESTAMPTZ,
+    easternUtcOffset TEXT,
+    venueUtcOffset TEXT,
+    gameCenterLink TEXT,
+    scrapedOn TIMESTAMPTZ DEFAULT now()
+);
+
+-- 6. PLAYER_STATS TABLE
 CREATE TABLE player_stats (
-    id TEXT PRIMARY KEY,
-    playerid BIGINT REFERENCES players(id),
+    id TEXT PRIMARY KEY, -- playerid_season_strength
+    playerId BIGINT REFERENCES players(id),
     season BIGINT NOT NULL,
     is_goalie BOOLEAN,
     team TEXT,
     opp TEXT,
     strength TEXT,
-    gamesplayed NUMERIC, -- All counting stats moved to NUMERIC to stop "0.0" 400 errors
-    gamesstarted NUMERIC,
+    gamesPlayed NUMERIC,
+    gamesStarted NUMERIC,
     goals NUMERIC,
     assists NUMERIC,
     points NUMERIC,
-    plusminus NUMERIC,
-    penaltyminutes NUMERIC,
-    powerplaygoals NUMERIC,
-    shorthandedgoals NUMERIC,
-    gamewinninggoals NUMERIC,
-    overtimegoals NUMERIC,
+    plusMinus NUMERIC,
+    penaltyMinutes NUMERIC,
+    powerPlayGoals NUMERIC,
+    shortHandedGoals NUMERIC,
+    gameWinningGoals NUMERIC,
+    overTimeGoals NUMERIC,
     shots NUMERIC,
-    shotsagainst NUMERIC,
+    shotsAgainst NUMERIC,
     saves NUMERIC,
-    goalsagainst NUMERIC,
+    goalsAgainst NUMERIC,
     shutouts NUMERIC,
-    shootingpctg NUMERIC,
-    savepercentage NUMERIC,
-    goalsagainstaverage NUMERIC,
+    shootingPctg NUMERIC,
+    savePercentage NUMERIC,
+    goalsAgainstAverage NUMERIC,
     cf NUMERIC, ca NUMERIC, cf_pct NUMERIC,
     ff NUMERIC, fa NUMERIC, ff_pct NUMERIC,
     sf NUMERIC, sa NUMERIC, sf_pct NUMERIC,
@@ -94,46 +123,18 @@ CREATE TABLE player_stats (
     take_for NUMERIC, take_against NUMERIC,
     seconds NUMERIC,
     minutes NUMERIC,
-    avgtimeonicepergame NUMERIC,
-    avgshiftspergame NUMERIC,
-    faceoffwinpctg NUMERIC,
-    scrapedon TIMESTAMPTZ DEFAULT now()
+    avgTimeOnIcePerGame NUMERIC,
+    avgShiftsPerGame NUMERIC,
+    faceoffWinPctg NUMERIC,
+    scrapedOn TIMESTAMPTZ DEFAULT now()
 );
 
--- 5. SCHEDULE
-CREATE TABLE schedule (
-    id BIGINT PRIMARY KEY,
-    season BIGINT,
-    gamedate DATE,
-    gametype NUMERIC, -- Adjusted to NUMERIC
-    gamestate TEXT,
-    hometeam_id BIGINT,
-    hometeam_abbrev TEXT,
-    hometeam_score NUMERIC, -- Adjusted to NUMERIC
-    hometeam_commonname_default TEXT,
-    hometeam_placename_default TEXT,
-    hometeam_logo TEXT,
-    awayteam_id BIGINT,
-    awayteam_abbrev TEXT,
-    awayteam_score NUMERIC, -- Adjusted to NUMERIC
-    awayteam_commonname_default TEXT,
-    awayteam_placename_default TEXT,
-    awayteam_logo TEXT,
-    venue_default TEXT,
-    venue_location_default TEXT,
-    starttimeutc TIMESTAMPTZ,
-    easternutcoffset TEXT,
-    venueutcoffset TEXT,
-    gamecenterlink TEXT,
-    scrapedon TIMESTAMPTZ DEFAULT now()
-);
-
--- 6. PLAYS
+-- 7. PLAYS TABLE
 CREATE TABLE plays (
     id TEXT PRIMARY KEY,
     game_id BIGINT REFERENCES schedule(id),
     event_id BIGINT,
-    period NUMERIC, -- Adjusted to NUMERIC
+    period NUMERIC,
     period_type TEXT,
     time_in_period TEXT,
     time_remaining TEXT,
@@ -145,54 +146,55 @@ CREATE TABLE plays (
     y_coord NUMERIC,
     zone_code TEXT,
     ppt_replay_url TEXT,
-    scrapedon TIMESTAMPTZ DEFAULT now()
+    scrapedOn TIMESTAMPTZ DEFAULT now()
 );
 
--- 7. DRAFT
+-- 8. DRAFT TABLE
 CREATE TABLE draft (
     year BIGINT,
-    overall_pick BIGINT,
-    round_number BIGINT,
-    pick_in_round BIGINT,
-    team_tricode TEXT,
+    overallPick BIGINT,
+    roundNumber BIGINT,
+    pickInRound BIGINT,
+    team_triCode TEXT,
     player_id BIGINT,
-    player_firstname TEXT,
-    player_lastname TEXT,
+    player_firstName TEXT,
+    player_lastName TEXT,
     player_position TEXT,
-    player_birthcountry TEXT,
-    player_birthstateprovince TEXT,
-    player_years_pro NUMERIC, -- Adjusted to NUMERIC
-    amateurclubname TEXT,
-    amateurleague TEXT,
-    countrycode TEXT,
-    displayabbrev_default TEXT,
-    scrapedon TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (year, overall_pick)
+    player_birthCountry TEXT,
+    player_birthStateProvince TEXT,
+    player_years_pro NUMERIC,
+    amateurClubName TEXT,
+    amateurLeague TEXT,
+    countryCode TEXT,
+    displayAbbrev_default TEXT,
+    scrapedOn TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (year, overallPick)
 );
 
--- 8. STANDINGS
+-- 9. STANDINGS TABLE
 CREATE TABLE standings (
     date DATE,
-    teamabbrev_default TEXT,
-    teamname_default TEXT,
-    teamcommonname_default TEXT,
-    conference_name TEXT,
-    division_name TEXT,
-    gamesplayed NUMERIC, -- Adjusted to NUMERIC
+    teamAbbrev_default TEXT,
+    teamName_default TEXT,
+    teamCommonName_default TEXT,
+    conferenceName TEXT,
+    divisionName TEXT,
+    gamesPlayed NUMERIC,
     wins NUMERIC,
     losses NUMERIC,
-    otlosses NUMERIC,
+    otLosses NUMERIC,
     points NUMERIC,
-    pointpctg NUMERIC,
-    regulationwins NUMERIC,
+    pointPctg NUMERIC,
+    regulationWins NUMERIC,
     row NUMERIC,
-    goalsfor NUMERIC,
-    goalsagainst NUMERIC,
-    goaldifferential NUMERIC,
-    streak_code TEXT,
-    streak_count NUMERIC,
-    scrapedon TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (date, teamabbrev_default)
+    goalsFor NUMERIC,
+    goalsAgainst NUMERIC,
+    goalDifferential NUMERIC,
+    streakCode TEXT,
+    streakCount NUMERIC,
+    scrapedOn TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (date, teamAbbrev_default)
 );
 
+-- Reload PostgREST to recognize changes
 NOTIFY pgrst, 'reload schema';
