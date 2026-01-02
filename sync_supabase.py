@@ -22,7 +22,7 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# EXHAUSTIVE WHITELIST - NO COLUMNS REMOVED
+# EXHAUSTIVE WHITELIST
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "firstseasonid", "lastseasonid", "mostrecentteamid", "active_status", "conference_name", "division_name", "franchiseid", "logos"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "shootscatches", "heightininches", "heightincentimeters", "weightinpounds", "weightinkilograms", "birthdate", "birthcountry", "birthcity_default", "birthstateprovince_default"],
@@ -45,35 +45,37 @@ def toi_to_decimal(toi_str):
 def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.DataFrame:
     if df.empty: return df
     
-    # Normalize headers
+    # 1. Normalize
     df.columns = [c.replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
     
-    # Fix Draft naming variations
+    # 2. Draft Variant Mapping (SEARCH FOR THE KEY)
     if table_name == "draft":
-        for col_alt in ["overallpick", "pickoverall", "draft_overall", "overall_pick_number"]:
-            if col_alt in df.columns and "overall_pick" not in df.columns:
-                df["overall_pick"] = df[col_alt]
+        variants = ["overallpick", "pickoverall", "draft_overall", "overall_pick_number", "pick_overall"]
+        for v in variants:
+            if v in df.columns and "overall_pick" not in df.columns:
+                df["overall_pick"] = df[v]
 
-    # Drop international fields
-    intl = ('_cs', '_fi', '_sk', '_sv', '_de', '_fr', '_es')
-    df = df.drop(columns=[c for c in df.columns if c.endswith(intl)], errors='ignore')
+    # 3. Intl Filter
+    df = df.drop(columns=[c for c in df.columns if c.endswith(('_cs', '_fi', '_sk', '_sv', '_de', '_fr', '_es'))], errors='ignore')
 
-    # Whitelist Filter
+    # 4. Whitelist Filter
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # Numeric Coercion (Vector-Safe)
-    num_patterns = ['id', 'season', 'pick', 'goals', 'played', 'number', 'wins', 'points', 'shots', 'saves']
+    # 5. Type Casting
+    num_pats = ['id', 'season', 'pick', 'goals', 'played', 'number', 'wins', 'points', 'shots', 'saves']
     for col in df.columns:
-        if any(p in col for p in num_patterns):
+        if any(p in col for p in num_pats):
             if not (table_name in ["player_stats", "plays"] and col == "id"):
                 df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
         if 'timeonice' in col:
             df[col] = df[col].apply(toi_to_decimal)
 
-    # DEDUPLICATION & NULL PK CHECK (Fixes 23502 and 21000)
-    df = df.dropna(subset=p_keys)
-    df = df.drop_duplicates(subset=p_keys, keep='first')
+    # 6. PK SAFETY CHECK (Fixes KeyError and 21000/23502)
+    existing_pks = [k for k in p_keys if k in df.columns]
+    if existing_pks:
+        df = df.dropna(subset=existing_pks)
+        df = df.drop_duplicates(subset=existing_pks, keep='first')
     
     return df.replace({np.nan: None})
 
@@ -87,54 +89,46 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
         LOG.error(f"Sync failed for {table_name}: {e}")
 
 def run_sync(mode="daily"):
-    season_str = "20242025"
-    season_int = 20242025
-    
-    # Teams & Standings
+    s_str, s_int = "20242025", 20242025
     sync_table("teams", scrapeTeams(source="records"), "id")
     sync_table("standings", scrapeStandings(), "date,teamabbrev_default")
     
-    # Iteration Logic
-    teams_list = ["MTL", "TOR", "NYR", "CHI", "EDM", "VAN"] # Expanded list in real run
+    # Active Teams
+    teams_clean = clean_and_validate(scrapeTeams(source="records"), "teams", ["id"])
+    active_teams = teams_clean[teams_clean['lastseasonid'].isna()]['teamabbrev'].dropna().unique().tolist()
 
     if mode == "catchup":
-        # Draft Sync
         for yr in range(2020, 2026):
             d_df = scrapeDraftRecords(str(yr))
             if not d_df.empty:
                 d_df["year"] = yr
                 sync_table("draft", d_df, "year,overall_pick")
 
-        for team in teams_list:
-            LOG.info(f"Syncing: {team}")
-            
-            # Players & Rosters
-            ros = scrapeRoster(team, season_str)
+        for team in active_teams:
+            LOG.info(f"Syncing {team}...")
+            ros = scrapeRoster(team, s_str)
             if not ros.empty:
-                ros['season'] = season_int
+                ros['season'] = s_int
                 sync_table("players", ros.copy(), "id")
                 sync_table("rosters", ros, "id,season")
 
-            # Analytical Stats
             for goalie in [False, True]:
-                st = scraper_legacy.scrapeTeamStats(team, season_str, goalies=goalie)
+                st = scraper_legacy.scrapeTeamStats(team, s_str, goalies=goalie)
                 if not st.empty:
                     st['playerid'] = st['playerId']
-                    st['season'] = season_int
-                    st['id'] = st.apply(lambda r: f"{r['playerid']}_{season_int}_{goalie}_{r.get('strength','all')}", axis=1)
-                    # Safety Parent Upsert
+                    st['season'] = s_int
+                    st['id'] = st.apply(lambda r: f"{r['playerid']}_{s_int}_{goalie}_{r.get('strength','all')}", axis=1)
                     p_saf = st[['playerid']].rename(columns={'playerid': 'id'}).drop_duplicates()
                     sync_table("players", p_saf, "id")
                     sync_table("player_stats", st, "id")
 
-            # Plays
-            sc = scrapeSchedule(team, season_str)
+            sc = scrapeSchedule(team, s_str)
             for gid in sc['id'].head(10).tolist():
-                plays = scrapePlays(gid)
-                if not plays.empty:
-                    plays['id'] = plays.apply(lambda r: f"{gid}_{r.get('eventid','0')}_{r.get('period','1')}", axis=1)
-                    plays['game_id'] = gid
-                    sync_table("plays", plays, "id")
+                pl = scrapePlays(gid)
+                if not pl.empty:
+                    pl['id'] = pl.apply(lambda r: f"{gid}_{r.get('eventid','0')}_{r.get('period','1')}", axis=1)
+                    pl['game_id'] = gid
+                    sync_table("plays", pl, "id")
 
 if __name__ == "__main__":
     run_sync(sys.argv[1] if len(sys.argv) > 1 else "daily")
