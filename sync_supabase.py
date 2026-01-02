@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 
-# Scrapers - Verified Names
+# Scrapers - Names verified from source files
 from scrapernhl.scrapers.teams import scrapeTeams
 from scrapernhl.scrapers.roster import scrapeRoster
 from scrapernhl.scrapers.schedule import scrapeSchedule
@@ -26,23 +26,31 @@ LOG = logging.getLogger(__name__)
 
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
-def clean_for_upsert(df):
-    """Aligns columns with SQL schema and handles JSON compliance."""
-    # Mirror CSV Export: dots to underscores
-    df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
-    # Replace NaN/Inf with None
-    return df.replace({np.nan: None, np.inf: None, -np.inf: None})
-
-def sync_table(table_name, df, p_key):
+def literal_sync(table_name, df, p_key):
+    """Syncs scraper DataFrames to Supabase matching CSV headers exactly."""
     if df.empty: return
-    df = clean_for_upsert(df)
     
-    # Batch Deduplication
+    # 1. Dot-to-Underscore and Lowercase (Matching SQL)
+    df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
+    
+    # 2. Filtering valid columns from SQL schema
+    try:
+        res = supabase.table(table_name).select("*").limit(1).execute()
+        if res.data:
+            valid_cols = list(res.data[0].keys())
+            df = df[[c for c in df.columns if c in valid_cols]]
+    except:
+        pass 
+
+    # 3. Handle JSON compliance (NaN -> None)
+    df = df.replace({np.nan: None, np.inf: None, -np.inf: None})
+    
+    # 4. Final Deduplication
     pk_list = [k.strip() for k in p_key.split(',')]
     temp_df = df.drop_duplicates(subset=pk_list, keep='last')
-    
     records = temp_df.to_dict('records')
-    # Handle list-to-string for JSONB columns if necessary
+    
+    # 5. Handle nested fields for JSONB
     for r in records:
         for k, v in r.items():
             if isinstance(v, (list, dict)):
@@ -50,52 +58,54 @@ def sync_table(table_name, df, p_key):
 
     try:
         supabase.table(table_name).upsert(records, on_conflict=p_key).execute()
-        LOG.info(f"Synced {len(records)} records to {table_name}")
+        LOG.info(f"Literal Sync: {len(records)} records to '{table_name}'")
     except Exception as e:
-        LOG.error(f"Sync failed for {table_name}: {e}")
+        LOG.error(f"Sync failed for '{table_name}': {e}")
 
 def run_sync(mode="daily"):
     S_STR, S_INT = "20252026", 20252026
-    LOG.info(f"STARTING REBUILD SYNC: Mode={mode}")
+    LOG.info(f"--- STARTING LITERAL SYNC | Mode: {mode} ---")
 
     # 1. TEAMS
-    sync_table("teams", scrapeTeams(source="records"), "id")
+    literal_sync("teams", scrapeTeams(source="calendar"), "id")
 
     # 2. STANDINGS
-    std = scrapeStandings(date=datetime.now().strftime('%Y-%m-%d'))
+    std = scrapeStandings()
     if not std.empty:
-        std['id'] = std['date'].astype(str) + "_" + std['teamAbbrev.default']
-        sync_table("standings", std, "id")
+        std.columns = [str(c).replace('.', '_').lower() for c in std.columns]
+        std['id'] = std['date'].astype(str) + "_" + std['teamabbrev_default'].astype(str)
+        literal_sync("standings", std, "id")
 
-    # 3. DRAFT
+    # 3. DRAFT (Catchup)
     if mode == "catchup":
         for year in range(2020, 2026):
             drft = scrapeDraftData(year)
             if not drft.empty:
                 drft['id'] = str(year) + "_" + drft['overallPick'].astype(str)
-                sync_table("draft", drft, "id")
+                literal_sync("draft", drft, "id")
 
-    # Determine teams
-    active_teams = ['MTL', 'BUF'] if mode == "debug" else ['MTL', 'BUF', 'TOR', 'BOS', 'NYR'] # Add full list for catchup
+    teams_df = scrapeTeams(source="calendar")
+    active_teams = ['MTL', 'BUF'] if mode == "debug" else teams_df['abbrev'].unique().tolist()
     
     global_games = set()
     for team in active_teams:
-        LOG.info(f"--- Processing {team} ---")
-        # 4. ROSTER & PLAYERS
+        # 4. ROSTER / PLAYERS
         ros = scrapeRoster(team, S_STR)
         if not ros.empty:
             ros['season'] = S_INT
             ros['teamabbrev'] = team
-            sync_table("players", ros.copy(), "id")
-            sync_table("rosters", ros, "id,season")
+            literal_sync("players", ros.copy(), "id")
+            literal_sync("rosters", ros, "id,season")
 
         # 5. SCHEDULE
         sched = scrapeSchedule(team, S_STR)
-        sched = sched[sched['gameType'] == 2]
+        sched.columns = [str(c).replace('.', '_').lower() for c in sched.columns]
+        sched_filtered = sched[sched['gametype'] == 2]
         if mode == "daily":
-            sched = sched[pd.to_datetime(sched['gameDate']) >= (datetime.now() - timedelta(days=5))]
-        sync_table("schedule", sched, "id")
-        global_games.update(sched[sched['gameState'].isin(['FINAL', 'OFF'])]['id'].tolist())
+            sched_filtered = sched_filtered[pd.to_datetime(sched_filtered['gamedate']) >= (datetime.now() - timedelta(days=5))]
+        
+        literal_sync("schedule", sched_filtered, "id")
+        global_games.update(sched_filtered[sched_filtered['gamestate'].isin(['FINAL', 'OFF'])]['id'].tolist())
 
     # 6. GLOBAL PLAYER STATS & PLAYS
     game_list = sorted(list(global_games))
@@ -104,35 +114,32 @@ def run_sync(mode="daily"):
     all_game_stats = []
     for gid in game_list:
         try:
-            LOG.info(f"Processing Game {gid}")
             pbp = predict_xg_for_pbp(engineer_xg_features(scrape_game(gid)))
             
-            # Sync Plays (Full Row as JSONB backup)
+            # Sync Plays (Literal from game.csv)
             plays_df = pbp.copy()
-            plays_df['id'] = str(gid) + "_" + plays_df['sortOrder'].astype(str)
-            plays_df['raw_play_data'] = plays_df.apply(lambda r: json.dumps(r.to_dict()), axis=1)
-            sync_table("plays", plays_df, "id")
+            # Rename '#' to sortorder if needed to match SQL
+            if '#' in plays_df.columns: plays_df = plays_df.rename(columns={'#': 'sortorder'})
+            plays_df['id'] = str(gid) + "_" + plays_df['sortorder'].astype(str)
+            literal_sync("plays", plays_df, "id")
 
-            # Aggregate
             stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
-            # Add counting stats manually as before to ensure accuracy
             pbp['Event'] = pbp['Event'].str.upper()
-            for event, label in [('GOAL', 'goals'), ('SHOT', 'shots')]:
-                cnt = pbp[pbp['Event'] == event].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name=label)
+            for ev, lbl in [('GOAL', 'goals'), ('SHOT', 'shots')]:
+                cnt = pbp[pbp['Event'] == ev].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name=lbl)
                 stats = stats.merge(cnt, on=['player1Id', 'eventTeam', 'strength'], how='left')
             all_game_stats.append(stats)
-        except Exception as e:
-            LOG.error(f"Game {gid} failed: {e}")
+        except Exception as e: LOG.error(f"Game {gid} failed: {e}")
 
     if all_game_stats:
         combined = pd.concat(all_game_stats)
-        # Final seasonal aggregation
-        agg = combined.groupby(['player1Id', 'player1Name', 'eventTeam', 'strength']).sum(numeric_only=True).reset_index()
+        combined.columns = [str(c).replace('.', '_').lower() for c in combined.columns]
+        agg = combined.groupby(['player1id', 'player1name', 'eventteam', 'strength']).sum(numeric_only=True).reset_index()
         agg['season'] = S_INT
-        agg['id'] = agg.apply(lambda r: f"{int(r.player1Id)}_{S_INT}_{r.strength}", axis=1)
-        gp = combined.groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='gamesplayed')
-        agg = agg.merge(gp, on=['player1Id', 'eventTeam', 'strength'])
-        sync_table("player_stats", agg, "id")
+        agg['id'] = agg.apply(lambda r: f"{int(r.player1id)}_{S_INT}_{r.strength}", axis=1)
+        gp = combined.groupby(['player1id', 'eventteam', 'strength']).size().reset_index(name='gamesplayed')
+        agg = agg.merge(gp, on=['player1id', 'eventteam', 'strength'])
+        literal_sync("player_stats", agg, "id")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
