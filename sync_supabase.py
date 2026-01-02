@@ -6,14 +6,15 @@ import numpy as np
 from supabase import create_client, Client
 
 # Scraper Imports
+from scrapernhl import (
+    scrape_game, 
+    engineer_xg_features, 
+    predict_xg_for_pbp, 
+    on_ice_stats_by_player_strength
+)
 from scrapernhl.scrapers.teams import scrapeTeams
 from scrapernhl.scrapers.roster import scrapeRoster
 from scrapernhl.scrapers.schedule import scrapeSchedule
-from scrapernhl.scrapers.stats import scrapeTeamStats
-from scrapernhl.scrapers.draft import scrapeDraftRecords
-from scrapernhl.scrapers.standings import scrapeStandings
-from scrapernhl.scrapers.games import scrapePlays
-from scrapernhl import scraper_legacy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOG = logging.getLogger(__name__)
@@ -22,51 +23,44 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# THE GROUND TRUTH WHITELIST
+# THE GROUND TRUTH WHITELIST - Flattened for Supabase
 WHITELISTS = {
-    "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "firstseasonid", "lastseasonid", "mostrecentteamid", "active_status", "conference_name", "division_name", "franchiseid", "logos"],
-    "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "shootscatches", "heightininches", "heightincentimeters", "weightinpounds", "weightinkilograms", "birthdate", "birthcountry", "birthcity_default", "birthstateprovince_default"],
+    "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
+    "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
     "rosters": ["id", "season", "teamabbrev", "sweaternumber", "positioncode"],
-    "player_stats": ["id", "playerid", "season", "is_goalie", "team", "opp", "strength", "gamesplayed", "gamesstarted", "goals", "assists", "points", "plusminus", "penaltyminutes", "powerplaygoals", "shorthandedgoals", "gamewinninggoals", "overtimegoals", "shots", "shotsagainst", "saves", "goalsagainst", "shutouts", "shootingpctg", "savepercentage", "goalsagainstaverage", "cf", "ca", "cf_pct", "ff", "fa", "ff_pct", "sf", "sa", "sf_pct", "gf", "ga", "gf_pct", "xg", "xga", "xgf_pct", "pf", "pa", "give_for", "give_against", "take_for", "take_against", "seconds", "minutes", "avgtimeonicepergame", "avgshiftspergame", "faceoffwinpctg"],
-    "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "hometeam_placename_default", "hometeam_logo", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "awayteam_placename_default", "awayteam_logo", "venue_default", "venue_location_default", "starttimeutc", "easternutcoffset", "venueutcoffset", "gamecenterlink"],
-    "standings": ["date", "teamabbrev_default", "teamname_default", "teamcommonname_default", "conference_name", "division_name", "gamesplayed", "wins", "losses", "otlosses", "points", "pointpctg", "regulationwins", "row", "goalsfor", "goalsagainst", "goaldifferential", "streak_code", "streak_count"],
-    "draft": ["year", "overall_pick", "round_number", "pick_in_round", "team_tricode", "player_id", "player_firstname", "player_lastname", "player_position", "player_birthcountry", "player_birthstateprovince", "player_years_pro", "amateurclubname", "amateurleague", "countrycode", "displayabbrev_default"],
-    "plays": ["id", "game_id", "event_id", "period", "period_type", "time_in_period", "time_remaining", "situation_code", "home_team_defending_side", "event_type", "type_desc_key", "x_coord", "y_coord", "zone_code", "ppt_replay_url"]
+    "player_stats": ["id", "playerid", "season", "team", "strength", "gamesplayed", "goals", "assists", "points", "shots", "cf", "ca", "ff", "fa", "sf", "sa", "gf", "ga", "xg", "xga", "seconds", "minutes"],
+    "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
 def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.DataFrame:
     if df.empty: return df
     
-    # 1. Normalize Names
-    df.columns = [str(c).replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
+    # 1. FLATTEN DOTTED COLUMNS (e.g., homeTeam.abbrev -> hometeam_abbrev)
+    df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
-    # 2. Map Scraper Sample Keys
+    # 2. SPECIFIC MAPPINGS BASED ON YOUR SAMPLES
     if table_name == "player_stats":
-        # Mapping from your sample row
-        if 'playerid' in df.columns: df['playerid'] = df['playerid']
-        if 'positioncode' in df.columns: df['positioncode'] = df['positioncode']
-        if 'avgtimeonicepergame' in df.columns:
-            # If it's the raw 995.36 float from the sample, use it directly
-            df['avgtimeonicepergame'] = pd.to_numeric(df['avgtimeonicepergame'], errors='coerce')
+        if 'player1id' in df.columns: df['playerid'] = df['player1id']
+        if 'eventteam' in df.columns: df['team'] = df['eventteam']
+        # xG/xGA might be lowercase after step 1, ensuring they are numeric
+        for col in ['xg', 'xga', 'cf', 'ca']:
+            if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    elif table_name == "players":
-        if 'firstname_default' not in df.columns and 'firstname_default' in df.columns:
-            df['firstname_default'] = df['firstname_default']
-        if 'lastname_default' not in df.columns and 'lastname_default' in df.columns:
-            df['lastname_default'] = df['lastname_default']
+    elif table_name == "schedule":
+        # Ensure we have the snake_case keys for whitelisting
+        if 'hometeam_id' not in df.columns and 'hometeam_id' in df.columns: pass # already flattened
 
-    # 3. Whitelist Filter
+    # 3. WHITELIST FILTER
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # 4. Cast Numeric Values
-    num_pats = ['id', 'season', 'pick', 'goals', 'played', 'number', 'wins', 'points', 'shots', 'saves', 'started']
+    # 4. NUMERIC CASTING (BIGINT SAFETY)
+    num_pats = ['id', 'season', 'goals', 'score', 'played']
     for col in df.columns:
-        if any(p in col for p in num_pats):
-            if not (table_name in ["player_stats", "plays"] and col == "id"):
-                df[col] = pd.to_numeric(pd.Series(df[col]), errors='coerce').fillna(0).round().astype(np.int64)
+        if any(p in col for p in num_pats) and not col.endswith('link'):
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).round().astype(np.int64)
 
-    # 5. Deduplicate
+    # 5. DEDUPLICATE
     existing_pks = [k for k in p_keys if k in df.columns]
     if existing_pks:
         df = df.dropna(subset=existing_pks).drop_duplicates(subset=existing_pks, keep='first')
@@ -87,47 +81,33 @@ def run_sync(mode="daily"):
     teams_df = scrapeTeams(source="records")
     sync_table("teams", teams_df, "id")
     
-    teams_df.columns = [c.lower() for c in teams_df.columns]
-    active_teams = teams_df[teams_df['lastseasonid'].isna()]['teamabbrev'].dropna().unique().tolist()
-
-    if mode == "debug":
-        active_teams = active_teams[:2]
-        LOG.info(f"DEBUG MODE: Limited to {active_teams}")
+    active_teams = ['MTL', 'BUF'] if mode == "debug" else teams_df['teamAbbrev'].unique().tolist()
 
     for team in active_teams:
-        LOG.info(f"Syncing {team}...")
+        LOG.info(f"--- Processing {team} ---")
         
-        # Rosters
-        ros = scrapeRoster(team, s_str)
-        if not ros.empty:
-            ros['season'] = s_int
-            ros['teamabbrev'] = team 
-            sync_table("players", ros.copy(), "id")
-            sync_table("rosters", ros, "id,season")
+        # SCHEDULE & ADVANCED STATS
+        schedule = scrapeSchedule(team, s_str)
+        # Check for both FINAL and OFF states
+        completed = schedule[schedule['gameState'].isin(['FINAL', 'OFF'])]
+        
+        # Sync Schedule metadata first
+        sync_table("schedule", schedule, "id")
 
-        # Stats
-        for goalie in [False, True]:
-            st = scraper_legacy.scrapeTeamStats(team, s_str, goalies=goalie)
-            if not st.empty:
-                st = st.rename(columns={'playerId': 'playerid'})
-                st['season'] = s_int
-                st['team'] = team
-                st['id'] = st.apply(lambda r: f"{r['playerid']}_{s_int}_{goalie}_{r.get('strength','all')}", axis=1)
-                sync_table("player_stats", st, "id")
+        # Process Advanced Stats from PBP
+        game_ids = completed['id'].tolist()
+        if mode == "debug": game_ids = game_ids[:2]
 
-        # Schedule
-        sc = scrapeSchedule(team, s_str)
-        if mode == "debug": sc = sc.head(3)
-        sync_table("schedule", sc, "id")
+        all_game_stats = []
+        for gid in game_ids:
+            try:
+                LOG.info(f"Calculating Advanced Stats: Game {gid}")
+                pbp = scrape_game(gid)
+                pbp = engineer_xg_features(pbp)
+                pbp = predict_xg_for_pbp(pbp)
+                stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
+                all_game_stats.append(stats)
+            except Exception as e:
+                LOG.error(f"Advanced stats failed for {gid}: {e}")
 
-        if mode != "debug":
-            for gid in sc['id'].tolist():
-                pl = scrapePlays(gid)
-                if not pl.empty:
-                    pl['id'] = pl.apply(lambda r: f"{gid}_{r.get('eventid', '0')}_{r.get('period', '1')}", axis=1)
-                    pl['game_id'] = gid
-                    sync_table("plays", pl, "id")
-
-if __name__ == "__main__":
-    sync_mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
-    run_sync(sync_mode)
+        if
