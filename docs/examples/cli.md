@@ -74,8 +74,8 @@ python scrapernhl/cli.py teams --polars
 
 ```
 Scraping NHL teams...
-✅ Successfully scraped 32 teams
-📁 Saved to: nhl_teams.csv
+Successfully scraped 32 teams
+Saved to: nhl_teams.csv
 ```
 
 ## Schedule Command
@@ -112,8 +112,8 @@ python scrapernhl/cli.py schedule VGK 20252026 --format parquet
 
 ```
 Scraping MTL schedule for 20252026...
-✅ Successfully scraped 82 games
-📁 Saved to: mtl_schedule_20252026.csv
+Successfully scraped 82 games
+Saved to: mtl_schedule_20252026.csv
 ```
 
 ## Standings Command
@@ -150,8 +150,8 @@ python scrapernhl/cli.py standings --output current_standings.csv
 
 ```
 Scraping NHL standings for 2026-01-01...
-✅ Successfully scraped standings for 32 teams
-📁 Saved to: nhl_standings_2026-01-01.csv
+Successfully scraped standings for 32 teams
+Saved to: nhl_standings_2026-01-01.csv
 ```
 
 ## Roster Command
@@ -181,8 +181,8 @@ python scrapernhl/cli.py roster TOR 20252026 --output leafs_roster.csv
 
 ```
 Scraping MTL roster for 20252026...
-✅ Successfully scraped 28 players
-📁 Saved to: mtl_roster_20252026.csv
+Successfully scraped 28 players
+Saved to: mtl_roster_20252026.csv
 ```
 
 ## Stats Command
@@ -223,8 +223,8 @@ python scrapernhl/cli.py stats NYR 20252026 --format json
 
 ```
 Scraping MTL skaters stats for 20252026...
-✅ Successfully scraped stats for 23 skaters
-📁 Saved to: mtl_skaters_20252026.csv
+Successfully scraped stats for 23 skaters
+Saved to: mtl_skaters_20252026.csv
 ```
 
 ## Game Command
@@ -264,16 +264,16 @@ python scrapernhl/cli.py game 2024020001 --with-xg --output game_with_xg.parquet
 
 ```
 Scraping play-by-play for game 2024020001...
-✅ Successfully scraped 312 events
-📁 Saved to: game_2024020001.csv
+Successfully scraped 312 events
+Saved to: game_2024020001.csv
 ```
 
 With xG:
 ```
 Scraping play-by-play for game 2024020001...
-✅ Calculated xG for shot events
-✅ Successfully scraped 312 events
-📁 Saved to: game_2024020001_with_xg.csv
+Calculated xG for shot events
+Successfully scraped 312 events
+Saved to: game_2024020001_with_xg.csv
 ```
 
 ## Draft Command
@@ -313,8 +313,8 @@ python scrapernhl/cli.py draft 2024 1 --output first_round_2024.csv
 
 ```
 Scraping 2024 NHL draft (round 1)...
-✅ Successfully scraped 32 draft picks
-📁 Saved to: nhl_draft_2024_r1.csv
+Successfully scraped 32 draft picks
+Saved to: nhl_draft_2024_r1.csv
 ```
 
 ## Practical Use Cases
