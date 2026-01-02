@@ -60,7 +60,7 @@ WHITELISTS = {
         "id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", 
         "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", 
         "hometeam_placename_default", "hometeam_logo", "awayteam_id", "awayteam_abbrev", 
-        "awayteam_score", "awayteam_commonname_default", "awayteam_placename_default", 
+        "awayTeam_score", "awayteam_commonname_default", "awayteam_placename_default", 
         "awayteam_logo", "venue_default", "venue_location_default", "starttimeutc", 
         "easternutcoffset", "venueutcoffset", "gamecenterlink"
     ],
@@ -90,21 +90,29 @@ STRICT_INTS = [
 ]
 
 def terminal_cast(val, col, table):
+    """Ensures Python types match PostgreSQL expectations to prevent 400 errors."""
     if pd.isna(val) or val is None:
         return None
+    
+    # Strictly cast ID and metadata fields to Integer
     if col in STRICT_INTS:
         if not (table in ["player_stats", "plays"] and col == "id"):
             try:
                 return int(round(float(val)))
             except:
                 return 0
+    
+    # Cast all counting/analytics metrics to Float for NUMERIC columns
     if isinstance(val, (float, np.floating, int, np.integer)):
         return float(val)
+        
     return str(val)
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
+    """Standardizes headers and prepares records for Upsert."""
     if df.empty: return []
-    # Force lowercase and remove dots
+    
+    # Standardize column headers: lowercase and replace dots with underscores
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
     if table_name == "player_stats":
@@ -125,6 +133,7 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     return records
 
 def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
+    """Executes the Supabase Upsert."""
     records = clean_and_validate(df, table_name)
     if not records: return
     try:
@@ -134,27 +143,33 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
         LOG.error(f"Sync failed for {table_name}: {e}")
 
 def run_sync(mode="daily"):
+    # --- PRODUCTION CONFIG: 2025-2026 Regular Season ---
     S_STR, S_INT = "20252026", 20252026
     LOG.info(f"STARTING SYNC: Mode={mode} | Season={S_STR}")
     
-    # 1. Teams Sync
-    teams_df = scrapeTeams(source="records")
-    # Normalize headers immediately
+    # 1. Teams Sync with Flattening for nested 'teams' column
+    raw_teams = scrapeTeams(source="records")
+    flattened_data = []
+    for _, row in raw_teams.iterrows():
+        base = row.to_dict()
+        nested_list = base.get('teams', [])
+        if nested_list and isinstance(nested_list, list):
+            team_info = nested_list[0]
+            base['activestatus'] = True if team_info.get('active') == 'Y' else False
+            base['conferencename'] = team_info.get('conference', {}).get('name')
+            base['divisionname'] = team_info.get('division', {}).get('name')
+            base['logos'] = str(team_info.get('logos', []))
+        flattened_data.append(base)
+    
+    teams_df = pd.DataFrame(flattened_data)
     teams_df.columns = [str(c).replace('.', '_').lower() for c in teams_df.columns]
     sync_table("teams", teams_df, "id")
-    
-    # Debugging column names to prevent KeyError
-    LOG.info(f"Teams columns available: {teams_df.columns.tolist()}")
     
     if mode == "debug":
         all_teams = ['MTL', 'BUF']
     else:
-        # Fallback if 'activestatus' is missing for some reason
-        if 'activestatus' in teams_df.columns:
-            all_teams = teams_df[teams_df['activestatus'] == True]['teamabbrev'].unique().tolist()
-        else:
-            LOG.warning("'activestatus' column not found, processing all teams in dataframe.")
-            all_teams = teams_df['teamabbrev'].unique().tolist()
+        # Filtering for active teams using the flattened 'activestatus' column
+        all_teams = teams_df[teams_df['activestatus'] == True]['teamabbrev'].unique().tolist()
     
     for team in all_teams:
         LOG.info(f"--- Processing {team} ---")
@@ -171,24 +186,18 @@ def run_sync(mode="daily"):
         # 3. Schedule Sync
         schedule_raw = scrapeSchedule(team, S_STR)
         schedule_raw.columns = [str(c).replace('.', '_').lower() for c in schedule_raw.columns]
-        
-        if 'gametype' in schedule_raw.columns:
-            schedule_raw = schedule_raw[schedule_raw['gametype'] == 2]
+        schedule_raw = schedule_raw[schedule_raw['gametype'] == 2] # Regular Season only
         
         if mode == "daily":
             cutoff = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-            if 'gamedate' in schedule_raw.columns:
-                schedule_raw = schedule_raw[schedule_raw['gamedate'] >= cutoff]
+            schedule_raw = schedule_raw[schedule_raw['gamedate'] >= cutoff]
         
         sync_table("schedule", schedule_raw, "id")
 
         # 4. Detailed Game Stats
-        if 'gamestate' in schedule_raw.columns:
-            completed = schedule_raw[schedule_raw['gamestate'].isin(['FINAL', 'OFF'])]
-            game_ids = completed['id'].tolist()
-        else:
-            game_ids = []
-
+        completed = schedule_raw[schedule_raw['gamestate'].isin(['FINAL', 'OFF'])]
+        game_ids = completed['id'].tolist()
+        
         if mode == "debug":
             game_ids = game_ids[:2]
 
@@ -200,13 +209,15 @@ def run_sync(mode="daily"):
                 pbp = engineer_xg_features(pbp)
                 pbp = predict_xg_for_pbp(pbp)
                 
-                # Dynamic Player Registry
+                # Dynamic Player Registry for players found in PBP but not on roster
                 u_p = pbp[['player1Id', 'player1Name']].dropna().drop_duplicates()
                 mini_p = pd.DataFrame({'id': u_p['player1Id'], 'firstname_default': u_p['player1Name']})
                 sync_table("players", mini_p, "id")
 
+                # Generate analytics stats
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
+                # Manual aggregation of counting metrics
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -222,14 +233,21 @@ def run_sync(mode="daily"):
 
         if all_game_stats:
             combined = pd.concat(all_game_stats)
-            metrics = ['seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2']
+            metrics = [
+                'seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 
+                'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2'
+            ]
             sum_map = {m: 'sum' for m in metrics if m in combined.columns}
+            
             agg = combined.groupby(['player1Id', 'eventTeam', 'strength']).agg(sum_map).reset_index()
             agg['assists'] = agg.get('a1', 0) + agg.get('a2', 0)
             agg['points'] = agg.get('goals', 0) + agg['assists']
             agg['season'] = S_INT
             agg['gamesplayed'] = len(game_ids)
+            
+            # Composite ID for player_stats: playerid_season_strength
             agg['id'] = agg.apply(lambda r: f"{int(float(r['player1Id']))}_{S_INT}_{r['strength']}", axis=1)
+            
             sync_table("player_stats", agg, "id")
 
 if __name__ == "__main__":
