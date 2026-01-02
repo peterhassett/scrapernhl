@@ -30,12 +30,13 @@ if not url or not key:
 
 supabase: Client = create_client(url, key)
 
-# --- MASTER WHITELISTS FOR ALL 8 TABLES ---
+# --- MASTER WHITELISTS (SOURCE-ALIGNED) ---
+# Column names match the SQL schema (lowercased version of API camelCase)
 WHITELISTS = {
     "teams": [
         "id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", 
-        "firstseasonid", "lastseasonid", "mostrecentteamid", "active_status", 
-        "conference_name", "division_name", "franchiseid", "logos"
+        "activestatus", "firstseasonid", "lastseasonid", "mostrecentteamid", 
+        "conferencename", "divisionname", "franchiseid", "logos"
     ],
     "players": [
         "id", "firstname_default", "lastname_default", "headshot", "positioncode", 
@@ -70,62 +71,56 @@ WHITELISTS = {
         "type_desc_key", "x_coord", "y_coord", "zone_code", "ppt_replay_url"
     ],
     "draft": [
-        "year", "overall_pick", "round_number", "pick_in_round", "team_tricode", 
+        "year", "overallpick", "roundnumber", "pickinround", "team_tricode", 
         "player_id", "player_firstname", "player_lastname", "player_position", 
         "player_birthcountry", "player_birthstateprovince", "player_years_pro", 
         "amateurclubname", "amateurleague", "countrycode", "displayabbrev_default"
     ],
     "standings": [
         "date", "teamabbrev_default", "teamname_default", "teamcommonname_default", 
-        "conference_name", "division_name", "gamesplayed", "wins", "losses", 
+        "conferencename", "divisionname", "gamesplayed", "wins", "losses", 
         "otlosses", "points", "pointpctg", "regulationwins", "row", "goalsfor", 
-        "goalsagainst", "goaldifferential", "streak_code", "streak_count"
+        "goalsagainst", "goaldifferential", "streakcode", "streakcount"
     ]
 }
 
-# BIGINT guard list
-STRICT_BIGINTS = [
+# Values that must be sent to Supabase as pure Integers
+STRICT_INTS = [
     "id", "playerid", "season", "game_id", "event_id", "hometeam_id", "awayteam_id", 
     "franchiseid", "player_id", "firstseasonid", "lastseasonid", "mostrecentteamid",
-    "year", "overall_pick", "round_number", "pick_in_round", "gametype", 
-    "heightininches", "heightincentimeters", "weightinpounds", "weightinkilograms",
-    "sweaternumber", "hometeam_score", "awayteam_score", "gamesplayed", "wins", 
-    "losses", "otlosses", "points", "regulationwins", "row", "goalsfor", 
-    "goalsagainst", "goaldifferential", "streak_count"
+    "year", "overallpick", "roundnumber", "pickinround", "gametype", "sweaternumber"
 ]
 
 def terminal_cast(val, col, table):
-    """Atomic cleaning of Python types for SQL compatibility."""
+    """Cleans types to prevent 400 Bad Request syntax errors."""
     if pd.isna(val) or val is None:
         return None
     
-    if col in STRICT_BIGINTS:
+    # Strictly cast ID and metadata fields to Integer
+    if col in STRICT_INTS:
         if not (table in ["player_stats", "plays"] and col == "id"):
             try:
                 return int(round(float(val)))
             except:
                 return 0
     
+    # Cast all counting/analytics metrics to Float for NUMERIC columns
     if isinstance(val, (float, np.floating, int, np.integer)):
         return float(val)
         
     return str(val)
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
+    """Standardizes headers and prepares records for Upsert."""
     if df.empty: return []
-    # Standardize headers: handle dots, camelCase, and underscore gaps
+    
+    # Transformation: Lowercase and replace dots (e.g. firstName.default -> firstname_default)
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
-    # Bridge API gaps to Match SQL Schema
-    mappings = {
-        'activestatus': 'active_status',
-        'teamabbrev': 'teamabbrev',
-        'player1id': 'playerid',
-        'eventteam': 'team'
-    }
-    for old, new in mappings.items():
-        if old in df.columns and new not in df.columns:
-            df = df.rename(columns={old: new})
+    # Mapping for analytics output compatibility
+    if table_name == "player_stats":
+        if 'player1id' in df.columns: df['playerid'] = df['player1id']
+        if 'eventteam' in df.columns: df['team'] = df['eventteam']
 
     allowed = WHITELISTS.get(table_name, [])
     actual_cols = [c for c in df.columns if c in allowed]
@@ -134,6 +129,7 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     records = []
     for row in df.to_dict(orient="records"):
         clean_row = {k: terminal_cast(v, k, table_name) for k, v in row.items()}
+        # Ensure dates aren't sent as '0' or 'nan'
         for d_col in ['gamedate', 'birthdate', 'starttimeutc', 'date']:
             if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
                 clean_row[d_col] = None
@@ -141,6 +137,7 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     return records
 
 def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
+    """Executes the Supabase Upsert."""
     records = clean_and_validate(df, table_name)
     if not records: return
     try:
@@ -150,23 +147,21 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
         LOG.error(f"Sync failed for {table_name}: {e}")
 
 def run_sync(mode="daily"):
+    # --- PRODUCTION CONFIG: 2025-2026 Season ---
     S_STR, S_INT = "20252026", 20252026
     LOG.info(f"STARTING SYNC: Mode={mode} | Season={S_STR}")
     
     # 1. Teams Sync
     teams_df = scrapeTeams(source="records")
-    # Normalize headers immediately so 'active_status' logic works
+    # Normalize immediately so filtering works
     teams_df.columns = [str(c).replace('.', '_').lower() for c in teams_df.columns]
-    if 'activestatus' in teams_df.columns:
-        teams_df = teams_df.rename(columns={'activestatus': 'active_status'})
-    
     sync_table("teams", teams_df, "id")
     
     if mode == "debug":
         all_teams = ['MTL', 'BUF']
     else:
-        # active_status and teamabbrev now guaranteed by the normalization in clean_and_validate context
-        all_teams = teams_df[teams_df['active_status'] == True]['teamabbrev'].unique().tolist()
+        # Filter for active teams using source-aligned names
+        all_teams = teams_df[teams_df['activestatus'] == True]['teamabbrev'].unique().tolist()
     
     for team in all_teams:
         LOG.info(f"--- Processing {team} ---")
@@ -183,9 +178,7 @@ def run_sync(mode="daily"):
         # 3. Schedule Sync
         schedule_raw = scrapeSchedule(team, S_STR)
         schedule_raw.columns = [str(c).replace('.', '_').lower() for c in schedule_raw.columns]
-        # Filter for Regular Season only
-        if 'gametype' in schedule_raw.columns:
-            schedule_raw = schedule_raw[schedule_raw['gametype'] == 2] 
+        schedule_raw = schedule_raw[schedule_raw['gametype'] == 2] # Regular Season only
         
         if mode == "daily":
             cutoff = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
@@ -215,7 +208,7 @@ def run_sync(mode="daily"):
 
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Counting Stats Aggregation
+                # Manual aggregation of counting metrics
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -231,7 +224,10 @@ def run_sync(mode="daily"):
 
         if all_game_stats:
             combined = pd.concat(all_game_stats)
-            metrics = ['seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2']
+            metrics = [
+                'seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 
+                'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2'
+            ]
             sum_map = {m: 'sum' for m in metrics if m in combined.columns}
             
             agg = combined.groupby(['player1Id', 'eventTeam', 'strength']).agg(sum_map).reset_index()
@@ -240,7 +236,7 @@ def run_sync(mode="daily"):
             agg['season'] = S_INT
             agg['gamesplayed'] = len(game_ids)
             
-            # Composite ID string
+            # Create composite ID string
             agg['id'] = agg.apply(lambda r: f"{int(float(r['player1Id']))}_{S_INT}_{r['strength']}", axis=1)
             
             sync_table("player_stats", agg, "id")
