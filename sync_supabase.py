@@ -27,45 +27,38 @@ def toi_to_decimal(toi_str):
     if pd.isna(toi_str) or not isinstance(toi_str, str) or ':' not in toi_str:
         return None
     try:
-        minutes, seconds = map(int, toi_str.split(':'))
-        return round(minutes + (seconds / 60.0), 2)
+        m, s = map(int, toi_str.split(':'))
+        return round(m + (s / 60.0), 2)
     except:
         return None
 
 def completist_prepare(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
     if df.empty: return df
     
-    # 1. Flatten Names
+    # STEP 1: DEDUPLICATE & NORMALIZE HEADERS
     df.columns = [c.replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
+    df = df.loc[:, ~df.columns.duplicated()].copy()
     
-    # 2. Convert TOI
-    if 'avgtimeonicepergame' in df.columns:
-        df['avgtimeonicepergame'] = df['avgtimeonicepergame'].apply(toi_to_decimal)
-
-    # 3. TYPE PROTECTION: Drop any column that contains non-scalar objects (Fixes TypeError)
-    # We check if the data type of the column is 'object' and then look for lists/dicts
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            # Check a non-null sample for complex types
-            sample = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
-            if isinstance(sample, (list, dict, tuple)):
-                df = df.drop(columns=[col])
-
-    # 4. Targeted Numeric Casting
-    num_patterns = ['id', 'season', 'number', 'played', 'goals', 'assists', 'points', 'wins', 'pick']
-    for col in df.columns:
-        if any(pat in col for pat in num_patterns):
-            # Final safety: only numericize if the remaining data isn't a string (like headshot URLs)
-            if not pd.api.types.is_string_dtype(df[col]):
-                df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
-
-    # 5. Clean and Intersection
-    df = df.replace({np.nan: None, np.inf: None, -np.inf: None})
+    # STEP 2: IMMEDIATE WHITELIST INTERSECTION (Crucial)
+    # This removes 'awayteam_airlinelink', 'tvbroadcasts', etc. BEFORE they can cause errors
     db_cols = get_actual_columns(table_name)
     if db_cols:
         matching = [c for c in df.columns if c in db_cols]
-        return df[matching]
-    return df
+        df = df[matching].copy()
+
+    # STEP 3: TRANSFORM REMAINING DATA
+    if 'avgtimeonicepergame' in df.columns:
+        df['avgtimeonicepergame'] = df['avgtimeonicepergame'].apply(toi_to_decimal)
+
+    # STEP 4: TARGETED NUMERIC CASTING (SAFE)
+    num_patterns = ['id', 'season', 'number', 'played', 'goals', 'assists', 'points', 'wins', 'pick']
+    for col in df.columns:
+        if any(pat in col for pat in num_patterns):
+            # Only process if the column isn't already empty and isn't a complex object
+            if not pd.api.types.is_object_dtype(df[col]):
+                df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
+
+    return df.replace({np.nan: None, np.inf: None, -np.inf: None})
 
 def sync_table(table_name: str, df: pd.DataFrame, p_key: str):
     df_ready = completist_prepare(df, table_name)
@@ -74,7 +67,7 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key: str):
         supabase.table(table_name).upsert(df_ready.to_dict(orient="records"), on_conflict=p_key).execute()
         print(f"Synced {len(df_ready)} rows to {table_name}")
     except Exception as e:
-        print(f"Failed {table_name}: {e}")
+        print(f"Sync error for {table_name}: {e}")
 
 def run_sync(mode="daily"):
     print(f"Starting COMPLETIST sync: {mode}")
