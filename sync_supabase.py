@@ -18,7 +18,6 @@ from scrapernhl import (
     on_ice_stats_by_player_strength
 )
 
-# Configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOG = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# Ground Truth Whitelist - These must match your Supabase columns exactly
+# Ground Truth Whitelist
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
@@ -35,16 +34,7 @@ WHITELISTS = {
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
-def clean_value(val):
-    """Handles NaN and ensures native Python types for Supabase/PostgREST."""
-    if pd.isna(val) or val is None:
-        return None
-    if isinstance(val, (np.integer, np.floating)):
-        return float(val)
-    return str(val)
-
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardizes all column names to lowercase snake_case (e.g. gameState -> gamestate)."""
     if df.empty: return df
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     return df
@@ -52,7 +42,6 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
     
-    # Ensure columns are normalized before whitelisting
     df = normalize_df(df)
     
     if table_name == "player_stats":
@@ -62,13 +51,46 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
+    # THE NUCLEAR FIX: Manual record construction with native Python types
     records = []
+    
+    # Define columns that MUST be whole numbers (integers)
+    # player_stats.id is excluded here as it is a string composite
+    int_fields = ['season', 'goals', 'assists', 'points', 'shots', 'gamesplayed', 
+                  'sweaternumber', 'playerid', 'hometeam_id', 'awayteam_id', 
+                  'hometeam_score', 'awayteam_score', 'heightininches', 'weightinpounds']
+
     for _, row in df.iterrows():
-        clean_row = {col: clean_value(val) for col, val in row.items()}
-        # Date safety for numeric schemas
-        for date_col in ['gamedate', 'birthdate']:
-            if date_col in clean_row and clean_row[date_col] in ["0.0", "0", "nan"]:
-                clean_row[date_col] = None
+        clean_row = {}
+        for col, val in row.items():
+            if pd.isna(val) or val is None:
+                clean_row[col] = None
+                continue
+            
+            # 1. Handle Composite String IDs
+            if table_name == "player_stats" and col == "id":
+                clean_row[col] = str(val)
+            
+            # 2. Handle Dates (Prevent 0.0 strings)
+            elif col in ['gamedate', 'birthdate', 'starttimeutc']:
+                s_val = str(val)
+                clean_row[col] = s_val if s_val not in ["0.0", "0", "nan", "NaT"] else None
+            
+            # 3. Handle Strict Integers (Force 1.0 -> 1)
+            elif any(x == col for x in int_fields) or (table_name != "player_stats" and col == "id"):
+                try:
+                    clean_row[col] = int(round(float(val)))
+                except:
+                    clean_row[col] = 0
+            
+            # 4. Handle Advanced Metrics (Floats)
+            elif isinstance(val, (float, np.floating, int, np.integer)):
+                clean_row[col] = float(val)
+            
+            # 5. Fallback
+            else:
+                clean_row[col] = val
+        
         records.append(clean_row)
     
     return records
@@ -94,13 +116,10 @@ def run_sync(mode="daily"):
     for team in active_teams:
         LOG.info(f"--- Processing {team} ---")
         
-        # 1. Schedule Sync
         schedule_raw = scrapeSchedule(team, s_str)
-        schedule = normalize_df(schedule_raw) # Standardize columns immediately
+        schedule = normalize_df(schedule_raw)
         sync_table("schedule", schedule, "id")
 
-        # 2. Player Stats Sync
-        # Note: using 'gamestate' lowercase because we just normalized it
         completed = schedule[schedule['gamestate'].isin(['FINAL', 'OFF'])]
         game_ids = completed['id'].tolist()
         if mode == "debug": game_ids = game_ids[:2]
@@ -114,7 +133,7 @@ def run_sync(mode="daily"):
                 pbp = predict_xg_for_pbp(pbp)
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Manually extract box-score counting stats (not in advanced output)
+                # Merge counting stats
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -143,7 +162,6 @@ def run_sync(mode="daily"):
             
             sync_table("player_stats", agg, "id")
 
-        # 3. Roster & Players Sync
         ros = scrapeRoster(team, s_str)
         if not ros.empty:
             ros['season'] = s_int
