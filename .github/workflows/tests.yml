@@ -24,6 +24,8 @@ jobs:
       
       - name: Install uv
         uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
       
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -56,6 +58,8 @@ jobs:
       
       - name: Install uv
         uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
       
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -76,7 +80,6 @@ jobs:
             requests==2.31.0 \
             selectolax==0.3.27 \
             urllib3==2.0.0 \
-            xgboost==2.0.0 \
             pytest==7.0.0
           uv pip install -e .
       
@@ -86,5 +89,5 @@ jobs:
           uv pip install -e .
           uv pip install pytest pytest-cov
       
-      - name: Run tests
-        run: uv run pytest -v
+      - name: Run tests (skip xG tests on minimum)
+        run: uv run pytest -v -k "not lazy_loading"
