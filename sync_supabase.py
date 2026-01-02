@@ -18,6 +18,7 @@ from scrapernhl import (
     on_ice_stats_by_player_strength
 )
 
+# Configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOG = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# Ground Truth Whitelist
+# Ground Truth Whitelist - These must match your Supabase columns exactly
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
@@ -34,55 +35,25 @@ WHITELISTS = {
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
-def nuclear_cast(val, col_name, table_name):
-    """
-    Ensures absolute type safety for PostgreSQL. 
-    Strips .0 from BigInts and ensures Dates are not 0.0.
-    """
+def clean_value(val):
+    """Handles NaN and ensures native Python types for Supabase/PostgREST."""
     if pd.isna(val) or val is None:
         return None
-    
-    # Columns that MUST be pure integers for Postgres BIGINT/INT
-    bigint_cols = [
-        'id', 'season', 'playerid', 'hometeam_id', 'awayteam_id', 
-        'hometeam_score', 'awayteam_score', 'gametype',
-        'goals', 'assists', 'points', 'shots', 'gamesplayed',
-        'sweaternumber', 'heightininches', 'weightinpounds'
-    ]
+    if isinstance(val, (np.integer, np.floating)):
+        return float(val)
+    return str(val)
 
-    # player_stats ID is a composite string: '8471234_20242025_5v5'
-    if table_name == "player_stats" and col_name == "id":
-        return str(val)
-
-    # Date safety
-    if col_name in ['gamedate', 'birthdate', 'starttimeutc']:
-        s_val = str(val)
-        if s_val in ["0.0", "0", "nan", "None", "NaT"]:
-            return None
-        return s_val
-
-    # Force strict native Python Integer
-    if col_name in bigint_cols or any(p in col_name for p in ['_id', 'score']):
-        try:
-            return int(round(float(val)))
-        except (ValueError, TypeError):
-            return 0
-            
-    # Force Float for advanced metrics
-    float_cols = ['xg', 'xga', 'cf', 'ca', 'ff', 'fa', 'sf', 'sa', 'gf', 'ga', 'seconds', 'minutes']
-    if any(f == col_name.lower() for f in float_cols):
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            return 0.0
-            
-    return val
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardizes all column names to lowercase snake_case (e.g. gameState -> gamestate)."""
+    if df.empty: return df
+    df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
+    return df
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
     
-    # Standardize column names
-    df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
+    # Ensure columns are normalized before whitelisting
+    df = normalize_df(df)
     
     if table_name == "player_stats":
         if 'player1id' in df.columns: df['playerid'] = df['player1id']
@@ -91,10 +62,13 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # Create list of dicts using nuclear_cast
     records = []
     for _, row in df.iterrows():
-        clean_row = {col: nuclear_cast(val, col, table_name) for col, val in row.items()}
+        clean_row = {col: clean_value(val) for col, val in row.items()}
+        # Date safety for numeric schemas
+        for date_col in ['gamedate', 'birthdate']:
+            if date_col in clean_row and clean_row[date_col] in ["0.0", "0", "nan"]:
+                clean_row[date_col] = None
         records.append(clean_row)
     
     return records
@@ -109,10 +83,9 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
         LOG.error(f"Sync failed for {table_name}: {e}")
 
 def run_sync(mode="daily"):
-    # Using the modularized scrapers for better performance
     s_str, s_int = "20242025", 20242025
     
-    LOG.info("Syncing Teams...")
+    LOG.info("Starting Sync...")
     teams_df = scrapeTeams(source="records")
     sync_table("teams", teams_df, "id")
     
@@ -121,12 +94,14 @@ def run_sync(mode="daily"):
     for team in active_teams:
         LOG.info(f"--- Processing {team} ---")
         
-        # 1. Schedule
-        schedule = scrapeSchedule(team, s_str)
+        # 1. Schedule Sync
+        schedule_raw = scrapeSchedule(team, s_str)
+        schedule = normalize_df(schedule_raw) # Standardize columns immediately
         sync_table("schedule", schedule, "id")
 
-        # 2. Player Stats (Aggregated from PBP)
-        completed = schedule[schedule['gameState'].isin(['FINAL', 'OFF'])]
+        # 2. Player Stats Sync
+        # Note: using 'gamestate' lowercase because we just normalized it
+        completed = schedule[schedule['gamestate'].isin(['FINAL', 'OFF'])]
         game_ids = completed['id'].tolist()
         if mode == "debug": game_ids = game_ids[:2]
 
@@ -137,11 +112,9 @@ def run_sync(mode="daily"):
                 pbp = scrape_game(gid)
                 pbp = engineer_xg_features(pbp)
                 pbp = predict_xg_for_pbp(pbp)
-                
-                # Metrics from scraper functions
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Manual counts for Box Score missing from on_ice_stats
+                # Manually extract box-score counting stats (not in advanced output)
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -154,7 +127,7 @@ def run_sync(mode="daily"):
                 
                 all_game_stats.append(stats)
             except Exception as e:
-                LOG.error(f"Failed processing game {gid}: {e}")
+                LOG.error(f"Failed Game {gid}: {e}")
 
         if all_game_stats:
             combined = pd.concat(all_game_stats)
@@ -170,7 +143,7 @@ def run_sync(mode="daily"):
             
             sync_table("player_stats", agg, "id")
 
-        # 3. Roster & Players
+        # 3. Roster & Players Sync
         ros = scrapeRoster(team, s_str)
         if not ros.empty:
             ros['season'] = s_int
