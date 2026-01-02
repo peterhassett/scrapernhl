@@ -11,41 +11,43 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# SCHEMA CACHE: Stores valid columns for each table to prevent PGRST204 errors
-VALID_COLS_CACHE = {}
+# CACHE for valid column names to prevent PGRST204 errors
+PHYSICAL_SCHEMA_CACHE = {}
 
-def get_db_columns(table_name: str) -> list:
-    """Queries Supabase for the actual columns in a table."""
-    if table_name in VALID_COLS_CACHE:
-        return VALID_COLS_CACHE[table_name]
+def get_actual_columns(table_name: str) -> list:
+    """Fetches valid column names from the DB and caches them."""
+    if table_name in PHYSICAL_SCHEMA_CACHE:
+        return PHYSICAL_SCHEMA_CACHE[table_name]
     try:
-        # Get table definition header
+        # Get the table structure header
         res = supabase.table(table_name).select("*").limit(0).execute()
         cols = list(res.data[0].keys()) if res.data else []
-        VALID_COLS_CACHE[table_name] = cols
+        PHYSICAL_SCHEMA_CACHE[table_name] = cols
         return cols
     except Exception as e:
-        print(f"Warning: Could not fetch schema for {table_name}: {e}")
+        print(f"Warning: Fetching schema for {table_name} failed: {e}")
         return []
 
 def completist_prepare(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
-    """Standardizes names, fixes types, and PRUNES unwanted columns."""
+    """Standardizes names, fixes types, and FILTERS noise columns."""
     if df.empty: return df
     
-    # 1. Flatten Names
+    # 1. Flatten dots to underscores (firstName.default -> firstname_default)
     df.columns = [c.replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
     
-    # 2. Kill 22P02 & TypeError: Targeted Numeric Casting
-    num_targets = ['id', 'season', 'number', 'played', 'goals', 'assists', 'points', 'wins', 'losses', 'pick']
+    # 2. Targeted Numeric Casting (Prevents TypeError on strings like 'headshot')
+    num_patterns = ['id', 'season', 'number', 'played', 'goals', 'assists', 'points', 'wins', 'pick']
     for col in df.columns:
-        if any(target in col for target in num_targets) and not isinstance(df[col].iloc[0], str):
+        if any(pat in col for pat in num_patterns):
+            # Safe numeric conversion only for target columns
             df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
 
     # 3. JSON Compliance
     df = df.replace({np.nan: None, np.inf: None, -np.inf: None})
 
-    # 4. CRITICAL: Prune to physical DB schema (Ignores unwanted 'firstname_fi', etc.)
-    db_cols = get_db_columns(table_name)
+    # 4. CRITICAL: Physical Intersection Check
+    # Automatically ignores unwanted 'firstname_fi', 'airlinedesc', etc.
+    db_cols = get_actual_columns(table_name)
     if db_cols:
         matching = [c for c in df.columns if c in db_cols]
         return df[matching]
@@ -58,7 +60,7 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key: str):
     if df_ready.empty: return
     try:
         supabase.table(table_name).upsert(df_ready.to_dict(orient="records"), on_conflict=p_key).execute()
-        print(f"Synced {len(df_ready)} rows to {table_name}")
+        print(f"Successfully synced {len(df_ready)} rows to {table_name}")
     except Exception as e:
         print(f"Failed {table_name}: {e}")
 
@@ -66,14 +68,14 @@ def run_sync(mode="daily"):
     print(f"Starting FINAL COMPLETIST sync: {mode}")
     current_season = "20242025"
     
-    # 1. TEAMS
+    # 1. Sync Teams (Foundation)
     from scrapernhl.scrapers.teams import scrapeTeams
     sync_table("teams", scrapeTeams(source="records"), "id")
     
     active_teams = ['MTL', 'VAN', 'CGY', 'NYI', 'NJD', 'WSH', 'EDM', 'CAR', 'COL', 'SJS', 'OTT', 'TBL']
 
     if mode == "catchup":
-        # 2. DRAFT
+        # 2. DRAFT (Last 5 Years)
         from scrapernhl.scrapers.draft import scrapeDraftData
         for year in range(2020, 2026):
             sync_table("draft", scrapeDraftData(str(year), 1), "year,overall_pick")
@@ -91,13 +93,14 @@ def run_sync(mode="daily"):
             sync_table("players", roster_raw.copy(), "id")
             sync_table("rosters", roster_raw, "id,season")
 
-            # 6. PLAYER_STATS (Advanced Metrics)
+            # 6. PLAYER_STATS (XGBoost Metrics)
             for is_goalie in [False, True]:
                 stats = scraper_legacy.scrapeTeamStats(team, current_season, goalies=is_goalie)
                 if not stats.empty:
-                    p_id = 'playerid' if 'playerid' in stats.columns else 'playerId'
-                    stats['id'] = stats.apply(lambda r: f"{r[p_id]}_{current_season}_{is_goalie}", axis=1)
-                    stats['playerid'] = stats[p_id]
+                    # Specific ID generation for seasonal stats
+                    p_id_col = 'playerid' if 'playerid' in stats.columns else 'playerId'
+                    stats['id'] = stats.apply(lambda r: f"{r[p_id_col]}_{current_season}_{is_goalie}", axis=1)
+                    stats['playerid'] = stats[p_id_col]
                     stats['season'] = int(current_season)
                     sync_table("player_stats", stats, "id")
 
