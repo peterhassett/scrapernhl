@@ -34,21 +34,54 @@ WHITELISTS = {
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
-def force_to_native(val, target_type='int'):
-    """Ensures clean types for Postgres BigInt and Numeric compatibility."""
+def nuclear_cast(val, col_name, table_name):
+    """
+    Ensures absolute type safety for PostgreSQL. 
+    Strips .0 from BigInts and ensures Dates are not 0.0.
+    """
     if pd.isna(val) or val is None:
-        return 0 if target_type == 'int' else 0.0
-    try:
-        if target_type == 'int':
-            return int(round(float(val)))
-        return float(val)
-    except:
-        return 0 if target_type == 'int' else 0.0
+        return None
+    
+    # Columns that MUST be pure integers for Postgres BIGINT/INT
+    bigint_cols = [
+        'id', 'season', 'playerid', 'hometeam_id', 'awayteam_id', 
+        'hometeam_score', 'awayteam_score', 'gametype',
+        'goals', 'assists', 'points', 'shots', 'gamesplayed',
+        'sweaternumber', 'heightininches', 'weightinpounds'
+    ]
 
-def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> list:
+    # player_stats ID is a composite string: '8471234_20242025_5v5'
+    if table_name == "player_stats" and col_name == "id":
+        return str(val)
+
+    # Date safety
+    if col_name in ['gamedate', 'birthdate', 'starttimeutc']:
+        s_val = str(val)
+        if s_val in ["0.0", "0", "nan", "None", "NaT"]:
+            return None
+        return s_val
+
+    # Force strict native Python Integer
+    if col_name in bigint_cols or any(p in col_name for p in ['_id', 'score']):
+        try:
+            return int(round(float(val)))
+        except (ValueError, TypeError):
+            return 0
+            
+    # Force Float for advanced metrics
+    float_cols = ['xg', 'xga', 'cf', 'ca', 'ff', 'fa', 'sf', 'sa', 'gf', 'ga', 'seconds', 'minutes']
+    if any(f == col_name.lower() for f in float_cols):
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
+            
+    return val
+
+def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
     
-    # Flatten names (e.g., homeTeam.abbrev -> hometeam_abbrev)
+    # Standardize column names
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
     if table_name == "player_stats":
@@ -58,35 +91,16 @@ def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> list:
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # Identify columns that often arrive as "9.0" but need to be integers or clean floats
-    int_fields = ['id', 'season', 'goals', 'assists', 'points', 'shots', 'score', 'gamesplayed', 'sweaternumber', 'playerid', 'hometeam_id', 'awayteam_id', 'heightininches', 'weightinpounds']
-    float_fields = ['xg', 'xga', 'cf', 'ca', 'ff', 'fa', 'sf', 'sa', 'gf', 'ga', 'seconds', 'minutes']
-
+    # Create list of dicts using nuclear_cast
     records = []
     for _, row in df.iterrows():
-        clean_row = {}
-        for col, val in row.items():
-            if col in ['gamedate', 'birthdate']:
-                # Date safety: prevent '0.0' or 'NaN' in date columns
-                val_str = str(val)
-                if pd.isna(val) or val_str in ["0.0", "0", "nan", "None"]:
-                    clean_row[col] = None
-                else:
-                    clean_row[col] = val_str
-            elif table_name == "player_stats" and col == "id":
-                clean_row[col] = str(val)
-            elif any(p in col for p in int_fields) and not col.endswith('link'):
-                clean_row[col] = force_to_native(val, 'int')
-            elif any(p in col for p in float_fields):
-                clean_row[col] = force_to_native(val, 'float')
-            else:
-                clean_row[col] = val if not pd.isna(val) else None
+        clean_row = {col: nuclear_cast(val, col, table_name) for col, val in row.items()}
         records.append(clean_row)
     
     return records
 
 def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
-    records = clean_and_validate(df, table_name, p_key_str.split(','))
+    records = clean_and_validate(df, table_name)
     if not records: return
     try:
         supabase.table(table_name).upsert(records, on_conflict=p_key_str).execute()
@@ -95,33 +109,39 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
         LOG.error(f"Sync failed for {table_name}: {e}")
 
 def run_sync(mode="daily"):
+    # Using the modularized scrapers for better performance
     s_str, s_int = "20242025", 20242025
+    
+    LOG.info("Syncing Teams...")
     teams_df = scrapeTeams(source="records")
     sync_table("teams", teams_df, "id")
     
     active_teams = ['MTL', 'BUF'] if mode == "debug" else teams_df['teamAbbrev'].unique().tolist()
 
     for team in active_teams:
-        LOG.info(f"--- {team} ---")
+        LOG.info(f"--- Processing {team} ---")
         
         # 1. Schedule
         schedule = scrapeSchedule(team, s_str)
-        completed = schedule[schedule['gameState'].isin(['FINAL', 'OFF'])]
         sync_table("schedule", schedule, "id")
 
-        # 2. Player Stats (Advanced)
+        # 2. Player Stats (Aggregated from PBP)
+        completed = schedule[schedule['gameState'].isin(['FINAL', 'OFF'])]
         game_ids = completed['id'].tolist()
         if mode == "debug": game_ids = game_ids[:2]
 
         all_game_stats = []
         for gid in game_ids:
             try:
+                LOG.info(f"Processing Game {gid}...")
                 pbp = scrape_game(gid)
                 pbp = engineer_xg_features(pbp)
                 pbp = predict_xg_for_pbp(pbp)
+                
+                # Metrics from scraper functions
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Fetch counting stats
+                # Manual counts for Box Score missing from on_ice_stats
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -131,24 +151,26 @@ def run_sync(mode="daily"):
                 stats = stats.merge(shots, on=['player1Id', 'eventTeam', 'strength'], how='left')
                 stats = stats.merge(a1.rename(columns={'player2Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
                 stats = stats.merge(a2.rename(columns={'player3Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
+                
                 all_game_stats.append(stats)
             except Exception as e:
-                LOG.error(f"Game {gid} failed: {e}")
+                LOG.error(f"Failed processing game {gid}: {e}")
 
         if all_game_stats:
             combined = pd.concat(all_game_stats)
             metrics = ['seconds', 'minutes', 'CF', 'CA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2']
             sum_map = {m: 'sum' for m in metrics if m in combined.columns}
-            agg = combined.groupby(['player1Id', 'eventTeam', 'strength']).agg(sum_map).reset_index()
             
+            agg = combined.groupby(['player1Id', 'eventTeam', 'strength']).agg(sum_map).reset_index()
             agg['assists'] = agg.get('a1', 0) + agg.get('a2', 0)
             agg['points'] = agg.get('goals', 0) + agg['assists']
             agg['season'] = s_int
             agg['gamesplayed'] = len(game_ids)
             agg['id'] = agg.apply(lambda r: f"{r['player1Id']}_{s_int}_{r['strength']}", axis=1)
+            
             sync_table("player_stats", agg, "id")
 
-        # 3. Roster
+        # 3. Roster & Players
         ros = scrapeRoster(team, s_str)
         if not ros.empty:
             ros['season'] = s_int
@@ -157,4 +179,5 @@ def run_sync(mode="daily"):
             sync_table("rosters", ros, "id,season")
 
 if __name__ == "__main__":
-    run_sync(sys.argv[1] if len(sys.argv) > 1 else "daily")
+    sync_mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
+    run_sync(sync_mode)
