@@ -1,24 +1,16 @@
-name: Manual Catchup Sync
-
-on:
-  workflow_dispatch: # Manual trigger from GitHub Actions UI
+name: Manual Season Catchup
+on: workflow_dispatch
 
 jobs:
   catchup:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      - name: Install System Dependencies
+        run: sudo apt-get update && sudo apt-get install -y libomp-dev
       - name: Install uv
         uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Run catchup sync
+      - name: Run catchup
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
