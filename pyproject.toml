@@ -47,6 +47,7 @@ dependencies = [
     "polars>=1.36.1",
     "requests>=2.32.5",
     "selectolax>=0.4.6",
+    "supabase>=2.27.0",
     "urllib3>=2.6.2",
     "xgboost>=3.1.2",
 ]
