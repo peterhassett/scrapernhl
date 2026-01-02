@@ -23,7 +23,7 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# Whitelists
+# Ground Truth Whitelist
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
@@ -32,75 +32,58 @@ WHITELISTS = {
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
-# THE DEFINITIVE BIGINT LIST
-# Any field here will have its decimal physically chopped off before the request
-STRICT_BIGINTS = [
+# The definitive list of fields that MUST be integers (BIGINT in Postgres)
+# If it's on this list, we strip the decimal.
+INT_FIELDS = [
     "playerid", "season", "gamesplayed", "goals", "assists", "points", "shots",
-    "hometeam_id", "awayteam_id", "hometeam_score", "awayteam_score", "gametype",
-    "sweaternumber", "heightininches", "weightinpounds"
+    "cf", "ca", "ff", "fa", "sf", "sa", "gf", "ga", "hometeam_id", "awayteam_id",
+    "hometeam_score", "awayteam_score", "gametype", "sweaternumber"
 ]
 
-def nuclear_cast(val, col, table):
-    """
-    Forces native Python types. 
-    If a field is in STRICT_BIGINTS, it is cast to a pure int (removing .0).
-    """
+def strict_cast(val, col, table):
+    """Atomic casting to ensure no '1.0' values hit BIGINT columns."""
     if pd.isna(val) or val is None:
         return None
     
-    # 1. Handle BIGINT fields (Strip decimals)
-    if col in STRICT_BIGINTS:
+    # Force pure Python int for BIGINT columns
+    if col in INT_FIELDS or (col == "id" and table != "player_stats"):
         try:
-            # float -> round -> int ensures 1.0 becomes 1
             return int(round(float(val)))
         except:
             return 0
             
-    # 2. Handle the 'id' field specifically 
-    if col == 'id':
-        if table == "player_stats":
-            return str(val) # '847..._2024_5v5'
-        try:
-            return int(round(float(val))) # Numeric IDs for teams/players/schedule
-        except:
-            return str(val)
-
-    # 3. Handle Floats (xG, Corsi, Minutes, etc.)
+    # Force native Python float for analytics (xG, seconds, minutes)
     if isinstance(val, (float, np.floating, int, np.integer)):
         return float(val)
         
-    # 4. Fallback for Strings/Dates
     return str(val)
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
     
-    # Standardize headers
+    # Standardize column names
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
     if table_name == "player_stats":
         if 'player1id' in df.columns: df['playerid'] = df['player1id']
         if 'eventteam' in df.columns: df['team'] = df['eventteam']
 
+    # Filter to whitelisted columns
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # Convert to list of dicts to break Pandas' type-hold
-    raw_records = df.to_dict(orient="records")
-    clean_records = []
-    
-    for record in raw_records:
-        # Rebuild the dictionary with native Python types
-        clean_row = {k: nuclear_cast(v, k, table_name) for k, v in record.items()}
+    # Move from Pandas to list of dicts and perform the Terminal Cast
+    records = []
+    for row in df.to_dict(orient="records"):
+        clean_row = {k: strict_cast(v, k, table_name) for k, v in row.items()}
         
         # Guard against '0.0' dates
         for d_col in ['gamedate', 'birthdate', 'starttimeutc']:
             if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
                 clean_row[d_col] = None
-                
-        clean_records.append(clean_row)
+        records.append(clean_row)
     
-    return clean_records
+    return records
 
 def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
     records = clean_and_validate(df, table_name)
@@ -114,7 +97,7 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
 def run_sync(mode="daily"):
     s_str, s_int = "20242025", 20242025
     
-    # Metadata update
+    LOG.info("Syncing Teams...")
     teams_df = scrapeTeams(source="records")
     sync_table("teams", teams_df, "id")
     
@@ -122,14 +105,13 @@ def run_sync(mode="daily"):
 
     for team in active_teams:
         LOG.info(f"--- {team} ---")
-        
-        # 1. Schedule update
         schedule_raw = scrapeSchedule(team, s_str)
         sync_table("schedule", schedule_raw, "id")
 
-        # 2. Player Stats (The complex table)
+        # Process games that are completed
         sched_norm = schedule_raw.copy()
         sched_norm.columns = [str(c).replace('.', '_').lower() for c in sched_norm.columns]
+        # SKIP PRESEASON (Type 1) if requested, or just process FINAL games
         completed = sched_norm[sched_norm['gamestate'].isin(['FINAL', 'OFF'])]
         
         game_ids = completed['id'].tolist()
@@ -144,7 +126,7 @@ def run_sync(mode="daily"):
                 pbp = predict_xg_for_pbp(pbp)
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Fetch Counting Stats manually
+                # Manual merge for goals/shots/assists
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -168,12 +150,13 @@ def run_sync(mode="daily"):
             agg['points'] = agg.get('goals', 0) + agg['assists']
             agg['season'] = s_int
             agg['gamesplayed'] = len(game_ids)
-            # This ID is the unique key: '847..._2024_5v5'
+            
+            # Clean composite ID: '847..._2024_5v5'
             agg['id'] = agg.apply(lambda r: f"{int(float(r['player1Id']))}_{s_int}_{r['strength']}", axis=1)
             
             sync_table("player_stats", agg, "id")
 
-        # 3. Roster & Players
+        # Roster
         ros = scrapeRoster(team, s_str)
         if not ros.empty:
             ros['season'] = s_int
