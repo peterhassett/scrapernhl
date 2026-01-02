@@ -9,15 +9,9 @@ from supabase import create_client, Client
 from scrapernhl.scrapers.teams import scrapeTeams
 from scrapernhl.scrapers.roster import scrapeRoster
 from scrapernhl.scrapers.schedule import scrapeSchedule
+from scrapernhl import scrape_game, engineer_xg_features, predict_xg_for_pbp, on_ice_stats_by_player_strength
 
-# Advanced Analytics (Lazy Loaded)
-from scrapernhl import (
-    scrape_game, 
-    engineer_xg_features, 
-    predict_xg_for_pbp, 
-    on_ice_stats_by_player_strength
-)
-
+# Configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOG = logging.getLogger(__name__)
 
@@ -34,66 +28,72 @@ WHITELISTS = {
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
-def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty: return df
-    df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
-    return df
+# Your "True INT" Master List
+TRUE_INTS = {
+    "player_stats": ["playerid", "season", "gamesplayed", "goals", "assists", "points", "shots"],
+    "schedule": ["season", "gametype", "hometeam_id", "hometeam_score", "awayteam_id", "awayteam_score"],
+    "players": ["id"],
+    "rosters": ["id", "season", "sweaternumber"],
+    "teams": ["id"]
+}
+
+def finalize_type(val, col, table):
+    """
+    Final stage casting. Converts to native Python types.
+    Strictly ignores decimals for the user-defined TRUE_INTS.
+    """
+    if pd.isna(val) or val is None:
+        return None
+    
+    # Check if this specific column in this table is a True INT
+    is_true_int = col in TRUE_INTS.get(table, [])
+    
+    # General rule: 'id' columns (except for player_stats composite) are usually ints
+    if col == "id" and table != "player_stats":
+        is_true_int = True
+
+    try:
+        if is_true_int:
+            # Force "1.0" -> 1 (This satisfies BIGINT if you ever go back)
+            return int(round(float(val)))
+        
+        # If not a strict INT, treat as float/string for NUMERIC columns
+        if isinstance(val, (float, np.floating, int, np.integer)):
+            return float(val)
+        
+        return str(val)
+    except:
+        return str(val)
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
     
-    df = normalize_df(df)
+    # 1. Normalize headers (homeTeam.id -> hometeam_id)
+    df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
+    # 2. Map internal field names
     if table_name == "player_stats":
         if 'player1id' in df.columns: df['playerid'] = df['player1id']
         if 'eventteam' in df.columns: df['team'] = df['eventteam']
 
+    # 3. Whitelist check
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # THE NUCLEAR FIX: Manual record construction with native Python types
-    records = []
-    
-    # Define columns that MUST be whole numbers (integers)
-    # player_stats.id is excluded here as it is a string composite
-    int_fields = ['season', 'goals', 'assists', 'points', 'shots', 'gamesplayed', 
-                  'sweaternumber', 'playerid', 'hometeam_id', 'awayteam_id', 
-                  'hometeam_score', 'awayteam_score', 'heightininches', 'weightinpounds']
-
-    for _, row in df.iterrows():
-        clean_row = {}
-        for col, val in row.items():
-            if pd.isna(val) or val is None:
-                clean_row[col] = None
-                continue
-            
-            # 1. Handle Composite String IDs
-            if table_name == "player_stats" and col == "id":
-                clean_row[col] = str(val)
-            
-            # 2. Handle Dates (Prevent 0.0 strings)
-            elif col in ['gamedate', 'birthdate', 'starttimeutc']:
-                s_val = str(val)
-                clean_row[col] = s_val if s_val not in ["0.0", "0", "nan", "NaT"] else None
-            
-            # 3. Handle Strict Integers (Force 1.0 -> 1)
-            elif any(x == col for x in int_fields) or (table_name != "player_stats" and col == "id"):
-                try:
-                    clean_row[col] = int(round(float(val)))
-                except:
-                    clean_row[col] = 0
-            
-            # 4. Handle Advanced Metrics (Floats)
-            elif isinstance(val, (float, np.floating, int, np.integer)):
-                clean_row[col] = float(val)
-            
-            # 5. Fallback
-            else:
-                clean_row[col] = val
+    # 4. Nuclear Clean: Bypass Pandas dict serialization
+    raw_dicts = df.to_dict(orient="records")
+    clean_records = []
+    for record in raw_dicts:
+        clean_row = {k: finalize_type(v, k, table_name) for k, v in record.items()}
         
-        records.append(clean_row)
+        # Date cleanup
+        for d_col in ['gamedate', 'birthdate', 'starttimeutc']:
+            if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
+                clean_row[d_col] = None
+        
+        clean_records.append(clean_row)
     
-    return records
+    return clean_records
 
 def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
     records = clean_and_validate(df, table_name)
@@ -114,13 +114,17 @@ def run_sync(mode="daily"):
     active_teams = ['MTL', 'BUF'] if mode == "debug" else teams_df['teamAbbrev'].unique().tolist()
 
     for team in active_teams:
-        LOG.info(f"--- Processing {team} ---")
+        LOG.info(f"--- {team} ---")
         
+        # 1. Schedule
         schedule_raw = scrapeSchedule(team, s_str)
-        schedule = normalize_df(schedule_raw)
-        sync_table("schedule", schedule, "id")
+        sync_table("schedule", schedule_raw, "id")
 
-        completed = schedule[schedule['gamestate'].isin(['FINAL', 'OFF'])]
+        # 2. Player Stats
+        sched_norm = schedule_raw.copy()
+        sched_norm.columns = [str(c).replace('.', '_').lower() for c in sched_norm.columns]
+        completed = sched_norm[sched_norm['gamestate'].isin(['FINAL', 'OFF'])]
+        
         game_ids = completed['id'].tolist()
         if mode == "debug": game_ids = game_ids[:2]
 
@@ -133,7 +137,7 @@ def run_sync(mode="daily"):
                 pbp = predict_xg_for_pbp(pbp)
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Merge counting stats
+                # Merge counts
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -143,7 +147,6 @@ def run_sync(mode="daily"):
                 stats = stats.merge(shots, on=['player1Id', 'eventTeam', 'strength'], how='left')
                 stats = stats.merge(a1.rename(columns={'player2Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
                 stats = stats.merge(a2.rename(columns={'player3Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
-                
                 all_game_stats.append(stats)
             except Exception as e:
                 LOG.error(f"Failed Game {gid}: {e}")
@@ -159,9 +162,9 @@ def run_sync(mode="daily"):
             agg['season'] = s_int
             agg['gamesplayed'] = len(game_ids)
             agg['id'] = agg.apply(lambda r: f"{r['player1Id']}_{s_int}_{r['strength']}", axis=1)
-            
             sync_table("player_stats", agg, "id")
 
+        # 3. Roster & Players
         ros = scrapeRoster(team, s_str)
         if not ros.empty:
             ros['season'] = s_int
