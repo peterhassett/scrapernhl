@@ -1,5 +1,6 @@
 # Getting Started
-Welcome to the **scrapernhl** package! This guide will help you get started with installing and using the package to scrape NHL data.
+
+Install the package and start scraping NHL data in minutes.
 
 ## Installation
 
@@ -39,7 +40,7 @@ python scrapernhl/cli.py schedule MTL 20252026
 python scrapernhl/cli.py standings
 ```
 
-See [CLI Examples](examples/cli.md) for comprehensive usage.
+See [CLI Examples](examples/cli.md) for more examples.
 
 ### Python API
 
@@ -56,7 +57,7 @@ schedule = scrape_schedule('MTL', '20252026')
 standings = scrape_standings('2026-01-01')
 ```
 
-See [API Reference](api.md) for complete documentation.
+See [API Reference](api.md) for all available functions.
 
 ## Requirements
 

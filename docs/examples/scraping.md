@@ -1,6 +1,6 @@
 # Basic Scraping Examples
 
-Comprehensive examples of how to use the `scrapernhl` package to scrape NHL data.
+Examples showing how to scrape NHL data.
 
 ## Setup
 

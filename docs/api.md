@@ -1,6 +1,6 @@
 # API Reference
 
-Comprehensive documentation of ScraperNHL's API. The scraper is organized into focused modules for easier use and faster imports.
+ScraperNHL API documentation. The scraper is split into modules for easier use and faster imports.
 
 ## Quick Start
 

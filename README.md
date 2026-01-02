@@ -1,10 +1,6 @@
-# Welcome to ScraperNHL's documentation!
-
-ScraperNHL is a Python package designed for scraping and analyzing NHL data. This documentation will guide you through the installation, usage, and features of the package.
-
 # ScraperNHL
 
-A comprehensive Python package for scraping and analyzing NHL data with built-in Expected Goals (xG) modeling and advanced analytics.
+Python package for scraping and analyzing NHL data with built-in Expected Goals (xG) modeling.
 
 [![Documentation](https://img.shields.io/badge/docs-mkdocs-blue)](https://maxtixador.github.io/scrapernhl/)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
@@ -12,25 +8,25 @@ A comprehensive Python package for scraping and analyzing NHL data with built-in
 
 ## Features
 
-### Comprehensive Data Scraping
-- **Teams**: NHL team data, rosters, and metadata
+### Data Scraping
+- **Teams**: NHL team data, rosters, metadata
 - **Schedule**: Team schedules with game states and scores
-- **Standings**: League standings with points and rankings
+- **Standings**: League standings
 - **Player Stats**: Skater and goalie statistics
-- **Play-by-Play**: Detailed game events with coordinates
-- **Draft Data**: Historical draft picks and prospects
-- **Expected Goals (xG)**: Built-in xG model for shot quality analysis
+- **Play-by-Play**: Game events with coordinates
+- **Draft Data**: Historical draft picks
+- **Expected Goals (xG)**: Built-in xG model
 
-### Multiple Access Methods
-- **Python API**: Full-featured library with pandas/polars support
-- **Command-Line Interface**: Quick data exports without writing code
-- **Jupyter Notebooks**: Interactive examples and tutorials
+### Access Methods
+- **Python API**: pandas/polars support
+- **Command-Line Interface**: Quick exports
+- **Jupyter Notebooks**: Interactive examples
 
-### Performance & Design
-- **Modular Architecture**: Fast imports (~100ms vs 2-3s)
-- **Flexible Output**: CSV, JSON, Parquet, Excel formats
-- **Backward Compatible**: Existing code works without changes
-- **Well Documented**: Comprehensive guides and API reference
+### Design
+- **Modular**: Fast imports (~100ms)
+- **Flexible Output**: CSV, JSON, Parquet, Excel
+- **Backward Compatible**: Works with existing code
+- **Documented**: Guides and API reference
 
 ## Installation
 
@@ -81,7 +77,7 @@ scrapernhl --help
 
 ## Documentation
 
-📚 **Full documentation available at: [maxtixador.github.io/scrapernhl](https://maxtixador.github.io/scrapernhl/)**
+Full documentation: [maxtixador.github.io/scrapernhl](https://maxtixador.github.io/scrapernhl/)
 
 - [Getting Started Guide](https://maxtixador.github.io/scrapernhl/getting-started/)
 - [API Reference](https://maxtixador.github.io/scrapernhl/api/)
@@ -91,25 +87,25 @@ scrapernhl --help
 
 ## Examples
 
-Check out the example notebooks for detailed tutorials:
-- [notebooks/01_basic_scraping.ipynb](notebooks/01_basic_scraping.ipynb) - Basic data scraping
-- [notebooks/02_advanced_analytics.ipynb](notebooks/02_advanced_analytics.ipynb) - xG analysis, TOI, player combinations
-- [notebooks/03_data_export.ipynb](notebooks/03_data_export.ipynb) - Export formats and workflows
+Check out the notebooks:
+- [notebooks/01_basic_scraping.ipynb](notebooks/01_basic_scraping.ipynb)
+- [notebooks/02_advanced_analytics.ipynb](notebooks/02_advanced_analytics.ipynb)
+- [notebooks/03_data_export.ipynb](notebooks/03_data_export.ipynb)
 
 ## What's New in v0.1.4
 
-- **Modular Architecture**: Codebase restructured into focused modules
-- **CLI Integration**: Command-line interface for all scraping functions
-- **Documentation Website**: Comprehensive guides and examples
-- **Performance**: Faster imports and optimized data fetching
-- **Testing**: Unit tests for reliability
-- **Standardized Code**: Consistent style across notebooks and examples
+- Modular architecture
+- CLI for all scraping functions
+- Documentation website
+- Faster imports
+- Unit tests
+- Standardized code
 
 See [full release notes](https://maxtixador.github.io/scrapernhl/announcements/version-014/)
 
 ## Contributing
 
-Contributions are welcome! Whether it's bug reports, feature requests, documentation improvements, or code contributions - your help makes this project better.
+Contributions welcome - bug reports, features, docs, or code.
 
 ## License
 
@@ -125,7 +121,7 @@ MIT License - see LICENSE file for details
 
 ## Acknowledgments
 
-Built for the hockey analytics community. Special thanks to all contributors and users who provide feedback and suggestions!
+Built for the hockey analytics community.
 
 ---
 
