@@ -22,13 +22,13 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# THE GROUND TRUTH WHITELIST - VERIFIED NO OMISSIONS
+# THE GROUND TRUTH WHITELIST - MATCHES SQL SCHEMA
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "firstseasonid", "lastseasonid", "mostrecentteamid", "active_status", "conference_name", "division_name", "franchiseid", "logos"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "shootscatches", "heightininches", "heightincentimeters", "weightinpounds", "weightinkilograms", "birthdate", "birthcountry", "birthcity_default", "birthstateprovince_default"],
     "rosters": ["id", "season", "teamabbrev", "sweaternumber", "positioncode"],
     "player_stats": ["id", "playerid", "season", "is_goalie", "team", "opp", "strength", "gamesplayed", "gamesstarted", "goals", "assists", "points", "plusminus", "penaltyminutes", "powerplaygoals", "shorthandedgoals", "gamewinninggoals", "overtimegoals", "shots", "shotsagainst", "saves", "goalsagainst", "shutouts", "shootingpctg", "savepercentage", "goalsagainstaverage", "cf", "ca", "cf_pct", "ff", "fa", "ff_pct", "sf", "sa", "sf_pct", "gf", "ga", "gf_pct", "xg", "xga", "xgf_pct", "pf", "pa", "give_for", "give_against", "take_for", "take_against", "seconds", "minutes", "avgtimeonicepergame", "avgshiftspergame", "faceoffwinpctg"],
-    "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "hometeam_placename_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "awayteam_placename_default", "venue_default", "venue_location_default", "starttimeutc", "gamecenterlink"],
+    "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "hometeam_placename_default", "hometeam_logo", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "awayteam_placename_default", "awayteam_logo", "venue_default", "venue_location_default", "starttimeutc", "easternutcoffset", "venueutcoffset", "gamecenterlink"],
     "standings": ["date", "teamabbrev_default", "teamname_default", "teamcommonname_default", "conference_name", "division_name", "gamesplayed", "wins", "losses", "otlosses", "points", "pointpctg", "regulationwins", "row", "goalsfor", "goalsagainst", "goaldifferential", "streak_code", "streak_count"],
     "draft": ["year", "overall_pick", "round_number", "pick_in_round", "team_tricode", "player_id", "player_firstname", "player_lastname", "player_position", "player_birthcountry", "player_birthstateprovince", "player_years_pro", "amateurclubname", "amateurleague", "countrycode", "displayabbrev_default"],
     "plays": ["id", "game_id", "event_id", "period", "period_type", "time_in_period", "time_remaining", "situation_code", "home_team_defending_side", "event_type", "type_desc_key", "x_coord", "y_coord", "zone_code", "ppt_replay_url"]
@@ -44,19 +44,14 @@ def toi_to_decimal(toi_str):
 
 def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.DataFrame:
     if df.empty: return df
-    
-    # 1. Standardize column names
     df.columns = [str(c).replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
     
-    # 2. MAPPING SHIMS (Captures data that scraper names differently)
     if table_name == "player_stats":
         if 'situation' in df.columns: df['strength'] = df['situation']
         if 'teamabbrev' in df.columns: df['team'] = df['teamabbrev']
         if 'opponentabbrev' in df.columns: df['opp'] = df['opponentabbrev']
-        # Capturing Advanced Metrics
         for m in ['cf', 'ca', 'ff', 'fa', 'xg', 'xga']:
             if f'raw_{m}' in df.columns: df[m] = df[f'raw_{m}']
-        # Time conversion
         if 'timeonice' in df.columns and 'seconds' not in df.columns:
             df['seconds'] = df['timeonice'].apply(lambda x: int(x.split(':')[0])*60 + int(x.split(':')[1]) if isinstance(x,str) and ':' in x else None)
 
@@ -74,18 +69,15 @@ def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.Da
     elif table_name == "schedule":
         if 'venuelocation' in df.columns: df['venue_location_default'] = df['venuelocation']
 
-    # 3. Whitelist Filter
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # 4. Numeric Casting (Fixes decimal string error 22P02)
     num_pats = ['id', 'season', 'pick', 'goals', 'played', 'number', 'wins', 'points', 'shots', 'saves', 'started']
     for col in df.columns:
         if any(p in col for p in num_pats):
             if not (table_name in ["player_stats", "plays"] and col == "id"):
                 df[col] = pd.to_numeric(pd.Series(df[col]), errors='coerce').fillna(0).round().astype(np.int64)
 
-    # 5. Deduplication
     existing_pks = [k for k in p_keys if k in df.columns]
     if existing_pks:
         df = df.dropna(subset=existing_pks)
@@ -108,9 +100,12 @@ def run_sync(mode="daily"):
     teams_df = scrapeTeams(source="records")
     sync_table("teams", teams_df, "id")
     
-    # Discovery
     teams_df.columns = [c.lower() for c in teams_df.columns]
     active_teams = teams_df[teams_df['lastseasonid'].isna()]['teamabbrev'].dropna().unique().tolist()
+
+    if mode == "debug":
+        active_teams = active_teams[:2]
+        LOG.info(f"DEBUG MODE: Syncing only {active_teams}")
 
     if mode == "catchup":
         for yr in range(2020, 2026):
@@ -138,7 +133,21 @@ def run_sync(mode="daily"):
                 sync_table("player_stats", st, "id")
 
         sc = scrapeSchedule(team, s_str)
+        if mode == "debug":
+            sc = sc.head(3)
         sync_table("schedule", sc, "id")
+        
+        # EXCLUDE PLAYS IN DEBUG MODE
+        if mode != "debug":
+            for gid in sc['id'].tolist():
+                pl = scrapePlays(gid)
+                if not pl.empty:
+                    pl['id'] = pl.apply(lambda r: f"{gid}_{r.get('eventid', '0')}_{r.get('period', '1')}", axis=1)
+                    pl['game_id'] = gid
+                    sync_table("plays", pl, "id")
+        else:
+            LOG.info(f"DEBUG MODE: Skipping plays for {team}")
 
 if __name__ == "__main__":
-    run_sync(sys.argv[1] if len(sys.argv) > 1 else "daily")
+    sync_mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
+    run_sync(sync_mode)
