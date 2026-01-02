@@ -23,12 +23,12 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# THE GROUND TRUTH WHITELIST - Flattened for Supabase
+# THE GROUND TRUTH WHITELIST - Matches your Supabase Table Columns
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
     "rosters": ["id", "season", "teamabbrev", "sweaternumber", "positioncode"],
-    "player_stats": ["id", "playerid", "season", "team", "strength", "gamesplayed", "goals", "assists", "points", "shots", "cf", "ca", "ff", "fa", "sf", "sa", "gf", "ga", "xg", "xga", "seconds", "minutes"],
+    "player_stats": ["id", "playerid", "season", "team", "strength", "gamesplayed", "goals", "assists", "points", "shots", "cf", "ca", "ff", "fa", "sf", "sa", "gf", "ga", "xg", "xga", "seconds", "minutes", "avgtimeonicepergame"],
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
@@ -42,13 +42,10 @@ def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.Da
     if table_name == "player_stats":
         if 'player1id' in df.columns: df['playerid'] = df['player1id']
         if 'eventteam' in df.columns: df['team'] = df['eventteam']
-        # xG/xGA might be lowercase after step 1, ensuring they are numeric
+        # Ensure xG and CF are numeric for the DB
         for col in ['xg', 'xga', 'cf', 'ca']:
-            if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    elif table_name == "schedule":
-        # Ensure we have the snake_case keys for whitelisting
-        if 'hometeam_id' not in df.columns and 'hometeam_id' in df.columns: pass # already flattened
+            if col in df.columns: 
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
     # 3. WHITELIST FILTER
     allowed = WHITELISTS.get(table_name, [])
@@ -94,7 +91,7 @@ def run_sync(mode="daily"):
         # Sync Schedule metadata first
         sync_table("schedule", schedule, "id")
 
-        # Process Advanced Stats from PBP
+        # Process Advanced Stats from Play-by-Play
         game_ids = completed['id'].tolist()
         if mode == "debug": game_ids = game_ids[:2]
 
@@ -110,4 +107,28 @@ def run_sync(mode="daily"):
             except Exception as e:
                 LOG.error(f"Advanced stats failed for {gid}: {e}")
 
-        if
+        if all_game_stats:
+            season_stats = pd.concat(all_game_stats)
+            # Group by player/strength to get season totals
+            agg = season_stats.groupby(['player1Id', 'eventTeam', 'strength']).agg({
+                'seconds': 'sum', 'minutes': 'sum',
+                'CF': 'sum', 'CA': 'sum', 'xG': 'sum', 'xGA': 'sum',
+                'goals': 'sum', 'assists': 'sum', 'shots': 'sum'
+            }).reset_index()
+            
+            agg['season'] = s_int
+            agg['gamesplayed'] = len(game_ids)
+            agg['id'] = agg.apply(lambda r: f"{r['player1Id']}_{s_int}_{r['strength']}", axis=1)
+            sync_table("player_stats", agg, "id")
+
+        # ROSTER
+        ros = scrapeRoster(team, s_str)
+        if not ros.empty:
+            ros['season'] = s_int
+            ros['teamabbrev'] = team 
+            sync_table("players", ros.copy(), "id")
+            sync_table("rosters", ros, "id,season")
+
+if __name__ == "__main__":
+    sync_mode = sys.argv[1] if len(sys.argv) > 1 else "daily"
+    run_sync(sync_mode)
