@@ -5,12 +5,12 @@ import pandas as pd
 import numpy as np
 from supabase import create_client, Client
 
-# Modular Scrapers
+# New Modular Scrapers
 from scrapernhl.scrapers.teams import scrapeTeams
 from scrapernhl.scrapers.roster import scrapeRoster
 from scrapernhl.scrapers.schedule import scrapeSchedule
 
-# Advanced Analytics
+# Advanced Analytics (Lazy Loaded)
 from scrapernhl import (
     scrape_game, 
     engineer_xg_features, 
@@ -25,6 +25,7 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
+# Ground Truth Whitelist
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
@@ -47,7 +48,7 @@ def force_to_native(val, target_type='int'):
 def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> list:
     if df.empty: return []
     
-    # Flatten names
+    # Flatten names (e.g., homeTeam.abbrev -> hometeam_abbrev)
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
     if table_name == "player_stats":
@@ -57,16 +58,22 @@ def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> list:
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # Field-Specific Type Mapping
-    int_fields = ['id', 'season', 'goals', 'assists', 'points', 'shots', 'score', 'gamesplayed', 'sweaternumber', 'playerid', 'hometeam_id', 'awayteam_id']
-    float_fields = ['xg', 'xga', 'cf', 'ca', 'ff', 'fa', 'sf', 'sa', 'gf', 'ga', 'seconds', 'minutes', 'weightinpounds', 'heightininches']
+    # Identify columns that often arrive as "9.0" but need to be integers or clean floats
+    int_fields = ['id', 'season', 'goals', 'assists', 'points', 'shots', 'score', 'gamesplayed', 'sweaternumber', 'playerid', 'hometeam_id', 'awayteam_id', 'heightininches', 'weightinpounds']
+    float_fields = ['xg', 'xga', 'cf', 'ca', 'ff', 'fa', 'sf', 'sa', 'gf', 'ga', 'seconds', 'minutes']
 
     records = []
     for _, row in df.iterrows():
         clean_row = {}
         for col, val in row.items():
-            # 'id' in player_stats is a string PK (e.g. 847..._2024_5v5)
-            if table_name == "player_stats" and col == "id":
+            if col in ['gamedate', 'birthdate']:
+                # Date safety: prevent '0.0' or 'NaN' in date columns
+                val_str = str(val)
+                if pd.isna(val) or val_str in ["0.0", "0", "nan", "None"]:
+                    clean_row[col] = None
+                else:
+                    clean_row[col] = val_str
+            elif table_name == "player_stats" and col == "id":
                 clean_row[col] = str(val)
             elif any(p in col for p in int_fields) and not col.endswith('link'):
                 clean_row[col] = force_to_native(val, 'int')
@@ -114,7 +121,7 @@ def run_sync(mode="daily"):
                 pbp = predict_xg_for_pbp(pbp)
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Merge individual counts
+                # Fetch counting stats
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
