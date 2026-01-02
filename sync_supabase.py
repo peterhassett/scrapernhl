@@ -136,19 +136,35 @@ def run_sync(mode="daily"):
     S_STR, S_INT = "20252026", 20252026
     LOG.info(f"STARTING SYNC: Mode={mode} | Season={S_STR}")
     
-    # 1. Teams Sync with Flattening
+    # 1. Teams Sync with Safe Flattening
     raw_teams = scrapeTeams(source="records")
     flattened_data = []
     for _, row in raw_teams.iterrows():
         base = row.to_dict()
         nested_list = base.get('teams', [])
-        if nested_list and isinstance(nested_list, list):
+        
+        # Initialize defaults for flattened fields
+        base['activestatus'] = False
+        base['conferencename'] = None
+        base['divisionname'] = None
+        base['logos'] = None
+
+        if isinstance(nested_list, list) and len(nested_list) > 0:
             team_info = nested_list[0]
-            # Matching your DB column: 'activestatus'
-            base['activestatus'] = True if team_info.get('active') == 'Y' else False
-            base['conferencename'] = team_info.get('conference', {}).get('name')
-            base['divisionname'] = team_info.get('division', {}).get('name')
-            base['logos'] = str(team_info.get('logos', []))
+            if isinstance(team_info, dict):
+                base['activestatus'] = True if team_info.get('active') == 'Y' else False
+                
+                # Safe Get for nested objects that might be None
+                conf = team_info.get('conference')
+                if isinstance(conf, dict):
+                    base['conferencename'] = conf.get('name')
+                
+                div = team_info.get('division')
+                if isinstance(div, dict):
+                    base['divisionname'] = div.get('name')
+                
+                base['logos'] = str(team_info.get('logos', []))
+        
         flattened_data.append(base)
     
     teams_df = pd.DataFrame(flattened_data)
