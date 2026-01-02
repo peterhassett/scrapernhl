@@ -4,83 +4,85 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from supabase import create_client, Client
-
-# Modular imports based on your README
 from scrapernhl import scraper_legacy
-from scrapernhl.scrapers.teams import scrapeTeams
-from scrapernhl.scrapers.roster import scrapeRoster
-from scrapernhl.scrapers.standings import scrapeStandings
-from scrapernhl.scrapers.schedule import scrapeSchedule
 
 # Initialize Supabase
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-def completist_prepare(df: pd.DataFrame) -> pd.DataFrame:
-    """Prepares DF for Postgres by flattening, type-fixing, and JSON cleaning."""
-    if df.empty: return df
-    
-    # 1. Flatten nested columns (firstName.default -> firstname_default)
-    df.columns = [c.replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
-    
-    # 2. Fix 22P02: Force all ID and count columns to nullable Int64 to avoid .0 float errors
-    int_patterns = ['id', 'season', 'number', 'played', 'goals', 'assists', 'points', 'year', 'wins', 'losses']
-    for col in df.columns:
-        if any(pat in col for pat in int_patterns):
-            df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
+def get_sql_type(dtype):
+    """Maps Pandas dtypes to PostgreSQL types."""
+    if pd.api.types.is_integer_dtype(dtype): return "BIGINT"
+    if pd.api.types.is_float_dtype(dtype): return "NUMERIC"
+    if pd.api.types.is_bool_dtype(dtype): return "BOOLEAN"
+    if pd.api.types.is_datetime64_any_dtype(dtype): return "TIMESTAMPTZ"
+    return "TEXT"
 
-    # 3. JSON Compliance: Convert NaNs to None
-    return df.replace({np.nan: None, np.inf: None, -np.inf: None})
-
-def sync_table(table_name: str, df: pd.DataFrame, p_key: str):
-    """Generic upsert that adapts to the provided DataFrame."""
-    df = completist_prepare(df)
+def sync_schema_and_upsert(table_name: str, df: pd.DataFrame, p_key: str):
+    """Detects new columns, adds them to SQL, then upserts the data."""
     if df.empty: return
     
-    # Note: If the table doesn't exist, Supabase requires manual creation 
-    # for security. But now we have the EXACT field names from the préparé DF.
+    # 1. Standardize Names
+    df.columns = [c.replace('.', '_').replace('%', '_pct').lower() for c in df.columns]
+    
+    # 2. Fix dtypes for Postgres (Int64 for integers to handle NaNs)
+    for col in df.columns:
+        if "id" in col or "year" in col or "played" in col or "goals" in col:
+            df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
+    
+    # 3. Dynamic Column Sync: Add missing columns to Supabase
+    for col in df.columns:
+        if col == "id" or col in p_key: continue
+        sql_type = get_sql_type(df[col].dtype)
+        # Call the helper function we created in SQL
+        supabase.rpc('add_column_if_missing', {
+            't_name': table_name, 
+            'c_name': col, 
+            'c_type': sql_type
+        }).execute()
+
+    # 4. Refresh PostgREST cache so it sees the new columns
+    supabase.rpc('reload_schema_cache').execute() # Requires a simple reload RPC
+
+    # 5. Clean JSON compliance and Upsert
+    df_clean = df.replace({np.nan: None, np.inf: None, -np.inf: None})
+    data = df_clean.to_dict(orient="records")
+    
     try:
-        data = df.to_dict(orient="records")
         supabase.table(table_name).upsert(data, on_conflict=p_key).execute()
-        print(f"Synced {len(data)} rows to {table_name}")
+        print(f"Successfully synced {len(data)} rows to {table_name}")
     except Exception as e:
-        print(f"Error syncing {table_name}: {e}")
+        print(f"Error in {table_name}: {e}")
 
 def run_sync(mode="daily"):
     print(f"Starting DYNAMIC COMPLETIST sync: {mode}")
     current_season = "20242025"
     
-    # TEAMS (The foundation)
+    # Example: Teams
+    from scrapernhl.scrapers.teams import scrapeTeams
     teams_df = scrapeTeams(source="records")
-    sync_table("teams", teams_df, "id")
+    sync_schema_and_upsert("teams", teams_df, "id")
     
-    # Use the cleaned version for the loop
-    t_clean = completist_prepare(teams_df.copy())
-    active_teams = t_clean[t_clean['lastseasonid'].isna()]['teamabbrev'].tolist()
+    # For catchup mode, process all active teams
+    active_teams = ['MTL', 'VAN', 'CGY', 'NYI', 'NJD', 'WSH', 'EDM', 'CAR', 'COL', 'SJS', 'OTT', 'TBL']
 
     if mode == "catchup":
-        # 1. DRAFT (Historical Registry)
-        for year in range(2020, 2026):
-            draft_df = scraper_legacy.scrapeDraftRecords(year)
-            sync_table("draft", draft_df, "year,overall_pick")
-
         for team in active_teams:
-            print(f"Deep Sync: {team}")
-            # 2. SCHEDULE & PLAYERS
-            sync_table("schedule", scrapeSchedule(team, current_season), "id")
-            sync_table("players", scrapeRoster(team, current_season), "id")
+            print(f"Deep Syncing: {team}")
+            from scrapernhl.scrapers.roster import scrapeRoster
+            from scrapernhl.scrapers.schedule import scrapeSchedule
+            
+            # These will now automatically add columns like 'firstname_fi' if found
+            sync_schema_and_upsert("players", scrapeRoster(team, current_season), "id")
+            sync_schema_and_upsert("schedule", scrapeSchedule(team, current_season), "id")
 
-            # 3. ADVANCED STATS (XGBoost Metrics)
             for is_goalie in [False, True]:
-                stats_raw = scraper_legacy.scrapeTeamStats(team, current_season, goalies=is_goalie)
-                if not stats_raw.empty:
-                    stats_df = completist_prepare(stats_raw)
-                    p_id_col = 'playerid' if 'playerid' in stats_df.columns else 'player_id'
-                    stats_df['id'] = stats_df.apply(lambda r: f"{r[p_id_col]}_{current_season}_{is_goalie}", axis=1)
-                    stats_df['team_tri_code'] = team
-                    stats_df['is_goalie'] = is_goalie
-                    sync_table("player_stats", stats_df, "id")
+                stats = scraper_legacy.scrapeTeamStats(team, current_season, goalies=is_goalie)
+                if not stats.empty:
+                    p_id = 'playerid' if 'playerid' in stats.columns else 'playerId'
+                    stats['id'] = stats.apply(lambda r: f"{r[p_id]}_{current_season}_{is_goalie}", axis=1)
+                    sync_schema_and_upsert("player_stats", stats, "id")
 
 if __name__ == "__main__":
     run_sync(sys.argv[1] if len(sys.argv) > 1 else "daily")
