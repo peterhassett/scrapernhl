@@ -5,12 +5,11 @@ on:
       sync_mode:
         description: 'Select Sync Mode'
         required: true
-        default: 'debug'
+        default: 'catchup'
         type: choice
         options:
           - debug
           - catchup
-          - daily
 
 jobs:
   sync:
@@ -30,5 +29,4 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        # Passes debug/catchup/daily choice from UI to the script
         run: uv run sync_supabase.py ${{ github.event.inputs.sync_mode }}

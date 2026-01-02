@@ -89,23 +89,26 @@ STRICT_BIGINTS = [
     "franchiseid", "player_id", "firstseasonid", "lastseasonid", "mostrecentteamid",
     "year", "overall_pick", "round_number", "pick_in_round", "gametype", 
     "heightininches", "heightincentimeters", "weightinpounds", "weightinkilograms",
-    "sweaternumber", "hometeam_score", "awayteam_score"
+    "sweaternumber", "hometeam_score", "awayteam_score", "gamesplayed", "wins", 
+    "losses", "otlosses", "points", "regulationwins", "row", "goalsfor", 
+    "goalsagainst", "goaldifferential", "streak_count"
 ]
 
 def terminal_cast(val, col, table):
-    """Atomic cleaning of Python types for SQL compatibility."""
+    """Atomic cleaning of Python types for SQL BIGINT vs NUMERIC compatibility."""
     if pd.isna(val) or val is None:
         return None
     
     # 1. Strip decimals from BIGINT columns
     if col in STRICT_BIGINTS:
+        # Exceptions for text-based IDs in player_stats and plays
         if not (table in ["player_stats", "plays"] and col == "id"):
             try:
                 return int(round(float(val)))
             except:
                 return 0
     
-    # 2. Force native Python float for all NUMERIC/Analytics columns
+    # 2. Force native Python float for all others (NUMERIC/Analytics columns)
     if isinstance(val, (float, np.floating, int, np.integer)):
         return float(val)
         
@@ -126,6 +129,7 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     records = []
     for row in df.to_dict(orient="records"):
         clean_row = {k: terminal_cast(v, k, table_name) for k, v in row.items()}
+        # Date/Time cleanup for Pandas '0.0' or 'NaN' artifacts
         for d_col in ['gamedate', 'birthdate', 'starttimeutc', 'date']:
             if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
                 clean_row[d_col] = None
@@ -142,32 +146,35 @@ def sync_table(table_name: str, df: pd.DataFrame, p_key_str: str):
         LOG.error(f"Sync failed for {table_name}: {e}")
 
 def run_sync(mode="daily"):
+    # --- PRODUCTION CONFIG: 2025-2026 Regular Season ---
     S_STR, S_INT = "20252026", 20252026
     LOG.info(f"STARTING SYNC: Mode={mode} | Season={S_STR}")
     
+    # 1. Teams Sync
     teams_df = scrapeTeams(source="records")
+    # Normalize immediately to prevent KeyError: 'active_status'
+    teams_df.columns = [c.lower() for c in teams_df.columns]
     sync_table("teams", teams_df, "id")
     
     # Mode-based team filtering
     if mode == "debug":
         all_teams = ['MTL', 'BUF']
     else:
-        # Standardize teamabbrev to lower to match schema/mapping
-        teams_df.columns = [c.lower() for c in teams_df.columns]
         all_teams = teams_df[teams_df['active_status'] == True]['teamabbrev'].unique().tolist()
     
     for team in all_teams:
         LOG.info(f"--- Processing {team} ---")
         
-        # 1. Roster/Players (Fills Parent Tables)
+        # 2. Roster/Players (Fills Parent Tables)
         ros = scrapeRoster(team, S_STR)
         if not ros.empty:
+            ros.columns = [c.lower() for c in ros.columns]
             ros['season'] = S_INT
             ros['teamabbrev'] = team 
             sync_table("players", ros.copy(), "id")
             sync_table("rosters", ros, "id,season")
 
-        # 2. Schedule Sync
+        # 3. Schedule Sync
         schedule_raw = scrapeSchedule(team, S_STR)
         schedule_raw.columns = [c.lower() for c in schedule_raw.columns]
         schedule_raw = schedule_raw[schedule_raw['gametype'] == 2] # Regular Season only
@@ -178,7 +185,7 @@ def run_sync(mode="daily"):
         
         sync_table("schedule", schedule_raw, "id")
 
-        # 3. Game Analytics & Stats
+        # 4. Detailed Game Stats
         completed = schedule_raw[schedule_raw['gamestate'].isin(['FINAL', 'OFF'])]
         game_ids = completed['id'].tolist()
         
@@ -216,7 +223,10 @@ def run_sync(mode="daily"):
 
         if all_game_stats:
             combined = pd.concat(all_game_stats)
-            metrics = ['seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2']
+            metrics = [
+                'seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 
+                'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2'
+            ]
             sum_map = {m: 'sum' for m in metrics if m in combined.columns}
             
             agg = combined.groupby(['player1Id', 'eventTeam', 'strength']).agg(sum_map).reset_index()
