@@ -18,6 +18,7 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
+# Whitelists to match Supabase table structures
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
@@ -26,36 +27,42 @@ WHITELISTS = {
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
-# These are the fields the Supabase API (Request Side) expects to be clean integers
-STRICT_INT_FIELDS = [
-    "playerid", "season", "gamesplayed", "goals", "assists", "points", "shots",
-    "gametype", "hometeam_id", "hometeam_score", "awayteam_id", "awayteam_score",
-    "id", "sweaternumber"
-]
+# Fields that MUST NOT have decimals (True INTs)
+TRUE_INTS = {
+    "player_stats": ["playerid", "season", "gamesplayed", "goals", "assists", "points", "shots"],
+    "schedule": ["season", "gametype", "hometeam_id", "hometeam_score", "awayteam_id", "awayteam_score"],
+    "players": ["id"],
+    "rosters": ["id", "season", "sweaternumber"],
+    "teams": ["id"]
+}
 
-def clean_for_request(val, col, table):
+def finalize_json_type(val, col, table):
     """
-    Final filter before JSON serialization. 
-    This is what ensures the REQUEST is valid.
+    Final stage casting for JSON serialization.
+    Ensures that True INTs are sent as pure integers (1) not floats (1.0).
     """
     if pd.isna(val) or val is None:
         return None
     
-    # 1. Force strict integers for identified fields
-    # Note: player_stats.id is a string (e.g. '847..._2024_5v5'), so we skip it
-    if col in STRICT_INT_FIELDS:
-        if not (table == "player_stats" and col == "id"):
-            try:
-                return int(round(float(val)))
-            except:
-                return 0
+    # Check for strict integer requirement
+    is_strict = col in TRUE_INTS.get(table, [])
     
-    # 2. Force floats for everything else numeric (xG, seconds, etc.)
-    if isinstance(val, (float, np.floating, int, np.integer)):
-        return float(val)
-    
-    # 3. Everything else (Strings/Dates)
-    return str(val)
+    # Catch all IDs except the player_stats composite ID
+    if col.endswith('id') and not (table == "player_stats" and col == "id"):
+        is_strict = True
+
+    try:
+        if is_strict:
+            # Atomic cast: float -> rounded -> int (strips .0)
+            return int(round(float(val)))
+        
+        # Everything else can be float or string
+        if isinstance(val, (float, np.floating, int, np.integer)):
+            return float(val)
+        
+        return str(val)
+    except:
+        return str(val)
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
@@ -70,17 +77,16 @@ def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # Convert to list of dicts - THIS IS THE POINT OF NO RETURN FOR PANDAS
-    raw_records = df.to_dict(orient="records")
+    # Convert to list of dicts to break Pandas' type-hold
+    raw_dicts = df.to_dict(orient="records")
     clean_records = []
     
-    for record in raw_records:
-        # Manually rebuild the record with Python native types
-        clean_row = {k: clean_for_request(v, k, table_name) for k, v in record.items()}
+    for record in raw_dicts:
+        clean_row = {k: finalize_json_type(v, k, table_name) for k, v in record.items()}
         
-        # Guard against '0.0' dates which kill the request
+        # Guard against '0.0' or 'nan' strings in date columns
         for d_col in ['gamedate', 'birthdate', 'starttimeutc']:
-            if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan", "None"]:
+            if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
                 clean_row[d_col] = None
                 
         clean_records.append(clean_row)
@@ -113,7 +119,6 @@ def run_sync(mode="daily"):
         sync_table("schedule", schedule_raw, "id")
 
         # 2. Player Stats
-        # Use localized normalization for filtering
         sched_norm = schedule_raw.copy()
         sched_norm.columns = [str(c).replace('.', '_').lower() for c in sched_norm.columns]
         completed = sched_norm[sched_norm['gamestate'].isin(['FINAL', 'OFF'])]
@@ -130,7 +135,7 @@ def run_sync(mode="daily"):
                 pbp = predict_xg_for_pbp(pbp)
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Manual counting
+                # Merge counting stats
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
