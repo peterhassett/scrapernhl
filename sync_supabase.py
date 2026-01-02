@@ -23,41 +23,33 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
-# THE GROUND TRUTH WHITELIST - Matches your Supabase Table Columns
 WHITELISTS = {
     "teams": ["id", "fullname", "teamabbrev", "teamcommonname", "teamplacename", "active_status", "conference_name", "division_name"],
     "players": ["id", "firstname_default", "lastname_default", "headshot", "positioncode", "heightininches", "weightinpounds", "birthdate", "birthcountry"],
     "rosters": ["id", "season", "teamabbrev", "sweaternumber", "positioncode"],
-    "player_stats": ["id", "playerid", "season", "team", "strength", "gamesplayed", "goals", "assists", "points", "shots", "cf", "ca", "ff", "fa", "sf", "sa", "gf", "ga", "xg", "xga", "seconds", "minutes", "avgtimeonicepergame"],
+    "player_stats": ["id", "playerid", "season", "team", "strength", "gamesplayed", "goals", "assists", "points", "shots", "cf", "ca", "ff", "fa", "sf", "sa", "gf", "ga", "xg", "xga", "seconds", "minutes"],
     "schedule": ["id", "season", "gamedate", "gametype", "gamestate", "hometeam_id", "hometeam_abbrev", "hometeam_score", "hometeam_commonname_default", "awayteam_id", "awayteam_abbrev", "awayteam_score", "awayteam_commonname_default", "venue_default", "starttimeutc", "gamecenterlink"]
 }
 
 def clean_and_validate(df: pd.DataFrame, table_name: str, p_keys: list) -> pd.DataFrame:
     if df.empty: return df
-    
-    # 1. FLATTEN DOTTED COLUMNS (e.g., homeTeam.abbrev -> hometeam_abbrev)
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
-    # 2. SPECIFIC MAPPINGS BASED ON YOUR SAMPLES
     if table_name == "player_stats":
         if 'player1id' in df.columns: df['playerid'] = df['player1id']
         if 'eventteam' in df.columns: df['team'] = df['eventteam']
-        # Ensure xG and CF are numeric for the DB
-        for col in ['xg', 'xga', 'cf', 'ca']:
+        for col in ['xg', 'xga', 'cf', 'ca', 'ff', 'fa', 'sf', 'sa', 'gf', 'ga']:
             if col in df.columns: 
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # 3. WHITELIST FILTER
     allowed = WHITELISTS.get(table_name, [])
     df = df[[c for c in df.columns if c in allowed]].copy()
 
-    # 4. NUMERIC CASTING (BIGINT SAFETY)
-    num_pats = ['id', 'season', 'goals', 'score', 'played']
+    num_pats = ['id', 'season', 'goals', 'assists', 'points', 'shots', 'score', 'played']
     for col in df.columns:
         if any(p in col for p in num_pats) and not col.endswith('link'):
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).round().astype(np.int64)
 
-    # 5. DEDUPLICATE
     existing_pks = [k for k in p_keys if k in df.columns]
     if existing_pks:
         df = df.dropna(subset=existing_pks).drop_duplicates(subset=existing_pks, keep='first')
@@ -82,46 +74,62 @@ def run_sync(mode="daily"):
 
     for team in active_teams:
         LOG.info(f"--- Processing {team} ---")
-        
-        # SCHEDULE & ADVANCED STATS
         schedule = scrapeSchedule(team, s_str)
-        # Check for both FINAL and OFF states
         completed = schedule[schedule['gameState'].isin(['FINAL', 'OFF'])]
-        
-        # Sync Schedule metadata first
         sync_table("schedule", schedule, "id")
 
-        # Process Advanced Stats from Play-by-Play
         game_ids = completed['id'].tolist()
         if mode == "debug": game_ids = game_ids[:2]
 
         all_game_stats = []
         for gid in game_ids:
             try:
-                LOG.info(f"Calculating Advanced Stats: Game {gid}")
+                LOG.info(f"Processing Game {gid}")
                 pbp = scrape_game(gid)
                 pbp = engineer_xg_features(pbp)
                 pbp = predict_xg_for_pbp(pbp)
-                stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
-                all_game_stats.append(stats)
+                
+                # 1. Advanced Metrics (On-Ice)
+                adv_stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
+                
+                # 2. Manual Box Score Aggregation from PBP
+                # Goals
+                goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
+                # Assists (player2 and player3 are usually the assists)
+                a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
+                a2 = pbp[pbp['Event'] == 'GOAL'].groupby(['player3Id', 'eventTeam', 'strength']).size().reset_index(name='a2')
+                # Shots
+                shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
+
+                # Merge box score stats into advanced stats
+                adv_stats = adv_stats.merge(goals.rename(columns={'player1Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
+                adv_stats = adv_stats.merge(shots.rename(columns={'player1Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
+                # Simplifying assists for the agg
+                adv_stats['assists'] = 0 # Initial
+                
+                all_game_stats.append(adv_stats)
             except Exception as e:
-                LOG.error(f"Advanced stats failed for {gid}: {e}")
+                LOG.error(f"Failed game {gid}: {e}")
 
         if all_game_stats:
             season_stats = pd.concat(all_game_stats)
-            # Group by player/strength to get season totals
-            agg = season_stats.groupby(['player1Id', 'eventTeam', 'strength']).agg({
+            # Use columns that definitely exist
+            agg_cols = {
                 'seconds': 'sum', 'minutes': 'sum',
-                'CF': 'sum', 'CA': 'sum', 'xG': 'sum', 'xGA': 'sum',
-                'goals': 'sum', 'assists': 'sum', 'shots': 'sum'
-            }).reset_index()
-            
+                'CF': 'sum', 'CA': 'sum', 'xG': 'sum', 'xGA': 'sum'
+            }
+            # Add box score cols only if they exist in the combined df
+            for c in ['goals', 'shots', 'assists']:
+                if c in season_stats.columns:
+                    agg_cols[c] = 'sum'
+
+            agg = season_stats.groupby(['player1Id', 'eventTeam', 'strength']).agg(agg_cols).reset_index()
+            agg['points'] = agg.get('goals', 0) + agg.get('assists', 0)
             agg['season'] = s_int
             agg['gamesplayed'] = len(game_ids)
             agg['id'] = agg.apply(lambda r: f"{r['player1Id']}_{s_int}_{r['strength']}", axis=1)
             sync_table("player_stats", agg, "id")
 
-        # ROSTER
         ros = scrapeRoster(team, s_str)
         if not ros.empty:
             ros['season'] = s_int
