@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 LOG = logging.getLogger(__name__)
 
-# Supabase Connection Initialization
+# Supabase Connection
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 if not url or not key:
@@ -50,15 +50,25 @@ WHITELISTS = {
 STRICT_INTS = ["id", "playerid", "season", "game_id", "event_id", "hometeam_id", "awayteam_id", "franchiseid", "player_id", "firstseasonid", "lastseasonid", "mostrecentteamid", "year", "overallpick", "roundnumber", "pickinround", "gametype", "sweaternumber"]
 
 def terminal_cast(val, col, table):
-    if pd.isna(val) or val is None: return None
+    """Rigid type enforcement for PostgreSQL compatibility and JSON compliance."""
+    # Catch NaN, Infinity, and None immediately
+    if pd.isna(val) or val is None or val == float('inf') or val == float('-inf'):
+        return None
+    
     if col == "activestatus":
         if isinstance(val, bool): return val
         return str(val).lower() in ['true', '1', 'y', '1.0']
+
     if col in STRICT_INTS:
         if not (table in ["player_stats", "plays"] and col == "id"):
             try: return int(round(float(val)))
             except: return 0
-    if isinstance(val, (float, np.floating, int, np.integer)): return float(val)
+            
+    if isinstance(val, (float, np.floating, int, np.integer)):
+        # Final JSON safety check for numeric types
+        f_val = float(val)
+        return None if np.isnan(f_val) or np.isinf(f_val) else f_val
+        
     return str(val)
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
@@ -144,54 +154,41 @@ def run_sync(mode="daily"):
         completed = schedule_raw[schedule_raw['gamestate'].isin(['FINAL', 'OFF'])]
         global_game_ids.update(completed['id'].tolist())
 
-    # --- LEAGUE-WIDE UNIQUE GAME PROCESSING ---
     game_list = sorted(list(global_game_ids))
     if mode == "debug": game_list = game_list[:5]
     
-    LOG.info(f"Processing {len(game_list)} unique games for player_stats...")
-
     for gid in game_list:
         try:
             LOG.info(f"Processing Game ID: {gid}")
             pbp = scrape_game(gid)
             pbp = engineer_xg_features(pbp)
             pbp = predict_xg_for_pbp(pbp)
-            
             u_p = pbp[['player1Id', 'player1Name']].dropna().drop_duplicates()
             mini_p = pd.DataFrame({'id': u_p['player1Id'], 'firstname_default': u_p['player1Name']})
             sync_table("players", mini_p, "id")
-
             stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
-            
             goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
             shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
             a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
             a2 = pbp[pbp['Event'] == 'GOAL'].groupby(['player3Id', 'eventTeam', 'strength']).size().reset_index(name='a2')
-            
             stats = stats.merge(goals, on=['player1Id', 'eventTeam', 'strength'], how='left')
             stats = stats.merge(shots, on=['player1Id', 'eventTeam', 'strength'], how='left')
             stats = stats.merge(a1.rename(columns={'player2Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
             stats = stats.merge(a2.rename(columns={'player3Id': 'player1Id'}), on=['player1Id', 'eventTeam', 'strength'], how='left')
-            
             all_processed_stats.append(stats)
         except Exception as e:
             LOG.error(f"Failed Game {gid}: {e}")
 
     if all_processed_stats:
-        LOG.info("Aggregating global player stats...")
         combined = pd.concat(all_processed_stats)
         metrics = ['seconds', 'minutes', 'CF', 'CA', 'FF', 'FA', 'SF', 'SA', 'GF', 'GA', 'xG', 'xGA', 'goals', 'shots', 'a1', 'a2']
         sum_map = {m: 'sum' for m in metrics if m in combined.columns}
-        
-        # Aggregate by Player and Strength across the whole league
         agg = combined.groupby(['player1Id', 'eventTeam', 'strength']).agg(sum_map).reset_index()
         agg['assists'] = agg.get('a1', 0) + agg.get('a2', 0)
         agg['points'] = agg.get('goals', 0) + agg['assists']
         agg['season'] = S_INT
-        # gamesplayed is tricky globally, we approximate by counting occurrences of player in games
         gp_count = combined.groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='gamesplayed')
         agg = agg.drop(columns=['gamesplayed'], errors='ignore').merge(gp_count, on=['player1Id', 'eventTeam', 'strength'])
-        
         agg['id'] = agg.apply(lambda r: f"{int(float(r['player1Id']))}_{S_INT}_{r['strength']}", axis=1)
         sync_table("player_stats", agg, "id")
 
