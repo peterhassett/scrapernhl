@@ -83,7 +83,7 @@ WHITELISTS = {
     ]
 }
 
-# BIGINT guard list - these columns must be pure integers in the JSON payload
+# BIGINT guard list
 STRICT_BIGINTS = [
     "id", "playerid", "season", "game_id", "event_id", "hometeam_id", "awayteam_id", 
     "franchiseid", "player_id", "firstseasonid", "lastseasonid", "mostrecentteamid",
@@ -95,20 +95,17 @@ STRICT_BIGINTS = [
 ]
 
 def terminal_cast(val, col, table):
-    """Atomic cleaning of Python types for SQL BIGINT vs NUMERIC compatibility."""
+    """Atomic cleaning of Python types for SQL compatibility."""
     if pd.isna(val) or val is None:
         return None
     
-    # 1. Strip decimals from BIGINT columns
     if col in STRICT_BIGINTS:
-        # Exceptions for text-based IDs in player_stats and plays
         if not (table in ["player_stats", "plays"] and col == "id"):
             try:
                 return int(round(float(val)))
             except:
                 return 0
     
-    # 2. Force native Python float for all others (NUMERIC/Analytics columns)
     if isinstance(val, (float, np.floating, int, np.integer)):
         return float(val)
         
@@ -116,20 +113,23 @@ def terminal_cast(val, col, table):
 
 def clean_and_validate(df: pd.DataFrame, table_name: str) -> list:
     if df.empty: return []
-    # Normalize headers to lowercase for consistency
+    # Standardize headers: lowercase and replace dots with underscores
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
+    # Custom mapping for stats table
     if table_name == "player_stats":
         if 'player1id' in df.columns: df['playerid'] = df['player1id']
         if 'eventteam' in df.columns: df['team'] = df['eventteam']
 
     allowed = WHITELISTS.get(table_name, [])
-    df = df[[c for c in df.columns if c in allowed]].copy()
+    # Filter to only whitelisted columns that actually exist in the dataframe
+    actual_cols = [c for c in df.columns if c in allowed]
+    df = df[actual_cols].copy()
 
     records = []
     for row in df.to_dict(orient="records"):
         clean_row = {k: terminal_cast(v, k, table_name) for k, v in row.items()}
-        # Date/Time cleanup for Pandas '0.0' or 'NaN' artifacts
+        # Date/Time cleanup
         for d_col in ['gamedate', 'birthdate', 'starttimeutc', 'date']:
             if d_col in clean_row and str(clean_row[d_col]) in ["0.0", "0", "nan"]:
                 clean_row[d_col] = None
@@ -152,23 +152,28 @@ def run_sync(mode="daily"):
     
     # 1. Teams Sync
     teams_df = scrapeTeams(source="records")
-    # Normalize immediately to prevent KeyError: 'active_status'
-    teams_df.columns = [c.lower() for c in teams_df.columns]
+    # Immediate normalization to handle scraper field naming variations
+    teams_df.columns = [str(c).replace('.', '_').lower() for c in teams_df.columns]
+    
+    # Handle specific field naming for 'active_status' from NHL API
+    if 'activestatus' in teams_df.columns:
+        teams_df = teams_df.rename(columns={'activestatus': 'active_status'})
+    
     sync_table("teams", teams_df, "id")
     
-    # Mode-based team filtering
     if mode == "debug":
         all_teams = ['MTL', 'BUF']
     else:
+        # Filter for active teams using lowercase column names
         all_teams = teams_df[teams_df['active_status'] == True]['teamabbrev'].unique().tolist()
     
     for team in all_teams:
         LOG.info(f"--- Processing {team} ---")
         
-        # 2. Roster/Players (Fills Parent Tables)
+        # 2. Roster/Players
         ros = scrapeRoster(team, S_STR)
         if not ros.empty:
-            ros.columns = [c.lower() for c in ros.columns]
+            ros.columns = [str(c).replace('.', '_').lower() for c in ros.columns]
             ros['season'] = S_INT
             ros['teamabbrev'] = team 
             sync_table("players", ros.copy(), "id")
@@ -176,7 +181,7 @@ def run_sync(mode="daily"):
 
         # 3. Schedule Sync
         schedule_raw = scrapeSchedule(team, S_STR)
-        schedule_raw.columns = [c.lower() for c in schedule_raw.columns]
+        schedule_raw.columns = [str(c).replace('.', '_').lower() for c in schedule_raw.columns]
         schedule_raw = schedule_raw[schedule_raw['gametype'] == 2] # Regular Season only
         
         if mode == "daily":
@@ -200,14 +205,17 @@ def run_sync(mode="daily"):
                 pbp = engineer_xg_features(pbp)
                 pbp = predict_xg_for_pbp(pbp)
                 
-                # Dynamic Player Registry for bubble players
+                # Dynamic Player Registry
                 u_p = pbp[['player1Id', 'player1Name']].dropna().drop_duplicates()
-                mini_p = pd.DataFrame({'id': u_p['player1Id'], 'firstname_default': u_p['player1Name']})
+                mini_p = pd.DataFrame({
+                    'id': u_p['player1Id'], 
+                    'firstname_default': u_p['player1Name']
+                })
                 sync_table("players", mini_p, "id")
 
                 stats = on_ice_stats_by_player_strength(pbp, include_goalies=False)
                 
-                # Logic to aggregate counting stats
+                # Counting Stats Aggregation
                 goals = pbp[pbp['Event'] == 'GOAL'].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='goals')
                 shots = pbp[pbp['Event'].isin(['SHOT', 'GOAL'])].groupby(['player1Id', 'eventTeam', 'strength']).size().reset_index(name='shots')
                 a1 = pbp[pbp['Event'] == 'GOAL'].groupby(['player2Id', 'eventTeam', 'strength']).size().reset_index(name='a1')
@@ -235,7 +243,7 @@ def run_sync(mode="daily"):
             agg['season'] = S_INT
             agg['gamesplayed'] = len(game_ids)
             
-            # Composite ID for player_stats
+            # Composite ID string while ensuring player ID is cast correctly
             agg['id'] = agg.apply(lambda r: f"{int(float(r['player1Id']))}_{S_INT}_{r['strength']}", axis=1)
             
             sync_table("player_stats", agg, "id")
