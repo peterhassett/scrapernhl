@@ -8,7 +8,7 @@ DROP TABLE IF EXISTS rosters CASCADE;
 DROP TABLE IF EXISTS players CASCADE;
 DROP TABLE IF EXISTS teams CASCADE;
 
--- 2. TEAMS: Literal mirror of teams.csv [cite: 205, 208]
+-- 2. TEAMS: Literal mirror of teams.csv [cite: 5]
 CREATE TABLE teams (
     id BIGINT PRIMARY KEY,
     seasonid BIGINT,
@@ -35,10 +35,11 @@ CREATE TABLE teams (
     firstseasonid BIGINT,
     lastseasonid BIGINT,
     mostrecentteamid BIGINT,
+    teamabbrev TEXT,
     teams JSONB
 );
 
--- 3. PLAYERS: Full bio support from roster.csv [cite: 201, 203]
+-- 3. PLAYERS: Full bio support from roster.csv [cite: 4]
 CREATE TABLE players (
     id BIGINT PRIMARY KEY,
     headshot TEXT,
@@ -60,10 +61,12 @@ CREATE TABLE players (
     birthcity_fi TEXT, birthcity_sv TEXT, birthcity_cs TEXT, birthcity_sk TEXT,
     firstname_cs TEXT, firstname_de TEXT, firstname_es TEXT, firstname_fi TEXT, 
     firstname_sk TEXT, firstname_sv TEXT, birthcity_fr TEXT,
+    lastname_cs TEXT, lastname_fi TEXT, lastname_sk TEXT, lastname_sv TEXT,
+    birthcity_de TEXT, lastname_de TEXT, lastname_es TEXT,
     season BIGINT, teamabbrev TEXT
 );
 
--- 4. ROSTERS: Tracking seasonal player-team links [cite: 201, 203]
+-- 4. ROSTERS: Tracking seasonal player-team links [cite: 4, 7]
 CREATE TABLE rosters (
     id BIGINT REFERENCES players(id),
     season BIGINT,
@@ -80,13 +83,13 @@ CREATE TABLE rosters (
     PRIMARY KEY (id, season)
 );
 
--- 5. SCHEDULE: Captures all operational and logistical data [cite: 129, 130, 166, 167, 168]
+-- 5. SCHEDULE: Captures operational and logistical data [cite: 3, 7]
 CREATE TABLE schedule (
     id BIGINT PRIMARY KEY,
     season BIGINT,
     gametype NUMERIC,
     gamedate DATE,
-    neutralsite BOOLEAN,
+    neutralsite NUMERIC,
     starttimeutc TEXT,
     easternutcoffset TEXT,
     venueutcoffset TEXT,
@@ -110,7 +113,7 @@ CREATE TABLE schedule (
     awayteam_abbrev TEXT,
     awayteam_logo TEXT,
     awayteam_darklogo TEXT,
-    awayteam_awaysplitsquad BOOLEAN,
+    awayteam_awaysplitsquad NUMERIC,
     awayteam_score NUMERIC,
     hometeam_id BIGINT,
     hometeam_commonname_default TEXT,
@@ -120,12 +123,12 @@ CREATE TABLE schedule (
     hometeam_abbrev TEXT,
     hometeam_logo TEXT,
     hometeam_darklogo TEXT,
-    hometeam_homesplitsquad BOOLEAN,
+    hometeam_homesplitsquad NUMERIC,
     hometeam_score NUMERIC,
     perioddescriptor_periodtype TEXT,
     perioddescriptor_maxregulationperiods NUMERIC,
     gameoutcome_lastperiodtype TEXT,
-    winninggoalie_playerid NUMERIC,
+    winninggoalie_playerid BIGINT,
     winninggoalie_firstinitial_default TEXT,
     winninggoalie_lastname_default TEXT,
     awayteam_placename_fr TEXT,
@@ -133,7 +136,7 @@ CREATE TABLE schedule (
     winninggoalie_lastname_fi TEXT,
     winninggoalie_lastname_sk TEXT,
     winninggoalie_lastname_sv TEXT,
-    winninggoalscorer_playerid NUMERIC,
+    winninggoalscorer_playerid BIGINT,
     winninggoalscorer_firstinitial_default TEXT,
     winninggoalscorer_lastname_default TEXT,
     venue_fr TEXT,
@@ -144,7 +147,7 @@ CREATE TABLE schedule (
     awayteam_airlinelink TEXT,
     awayteam_airlinedesc TEXT,
     awayteam_hotellink TEXT,
-    awayteam_hoteldesc TEXT,
+    awayTeam_hoteldesc TEXT,
     hometeam_airlinelink TEXT,
     hometeam_airlinedesc TEXT,
     hometeam_placename_fr TEXT,
@@ -156,10 +159,26 @@ CREATE TABLE schedule (
     awayteam_promodesc TEXT,
     hometeam_promolink TEXT,
     hometeam_promodesc TEXT,
-    venue_es TEXT
+    venue_es TEXT,
+    seriesurl TEXT,
+    seriesstatus_round NUMERIC,
+    seriesstatus_seriesabbrev TEXT,
+    seriesstatus_seriestitle TEXT,
+    seriesstatus_seriesletter TEXT,
+    seriesstatus_neededtowin NUMERIC,
+    seriesstatus_topseedwins NUMERIC,
+    seriesstatus_bottomseedwins NUMERIC,
+    seriesstatus_gamenumberofseries NUMERIC,
+    specialevent_parentid BIGINT,
+    specialevent_name_default TEXT,
+    specialevent_lightlogourl_default TEXT,
+    venue_cs TEXT,
+    venue_fi TEXT,
+    venue_sk TEXT,
+    alternatebroadcasts JSONB
 );
 
--- 6. PLAYS: Union of all 120+ possible columns from regular season games [cite: 210, 2150]
+-- 6. PLAYS: Full CSV mirror to game.csv [cite: 6, 7]
 CREATE TABLE plays (
     id TEXT PRIMARY KEY,
     gameid BIGINT REFERENCES schedule(id),
@@ -289,7 +308,7 @@ CREATE TABLE plays (
     raw_data JSONB
 );
 
--- 7. PLAYER_STATS: Aggregated metrics from play-by-play data
+-- 7. PLAYER_STATS: Mirror of aggregated metrics 
 CREATE TABLE player_stats (
     id TEXT PRIMARY KEY,
     player1id BIGINT REFERENCES players(id),
@@ -310,27 +329,26 @@ CREATE TABLE player_stats (
     xg NUMERIC, xga NUMERIC,
     pf NUMERIC, pa NUMERIC,
     gamesplayed NUMERIC,
-    scrapedon TIMESTAMPTZ DEFAULT now()
+    scrapedon TEXT DEFAULT now()
 );
 
--- 8. STANDINGS: Literal match of standings.csv [cite: 123, 126]
+-- 8. STANDINGS: Literal match of standings.csv [cite: 2]
 CREATE TABLE standings (
     id TEXT PRIMARY KEY,
-    date DATE,
-    seasonid BIGINT,
     conferenceabbrev TEXT,
     conferencehomesequence NUMERIC,
     conferencel10sequence NUMERIC,
     conferencename TEXT,
     conferenceroadsequence NUMERIC,
     conferencesequence NUMERIC,
+    date DATE,
     divisionabbrev TEXT,
     divisionhomesequence NUMERIC,
     divisionl10sequence NUMERIC,
     divisionname TEXT,
     divisionroadsequence NUMERIC,
     divisionsequence NUMERIC,
-    gametypeid NUMERIC,
+    gametypeid BIGINT,
     gamesplayed NUMERIC,
     goaldifferential NUMERIC,
     goaldifferentialpctg NUMERIC,
@@ -382,6 +400,7 @@ CREATE TABLE standings (
     roadregulationwins NUMERIC,
     roadties NUMERIC,
     roadwins NUMERIC,
+    seasonid BIGINT,
     shootoutlosses NUMERIC,
     shootoutwins NUMERIC,
     streakcode TEXT,
@@ -403,7 +422,7 @@ CREATE TABLE standings (
     teamcommonname_fr TEXT
 );
 
--- 9. DRAFT: Literal match of draft.csv [cite: 71, 99]
+-- 9. DRAFT: Literal match of draft.csv [cite: 1]
 CREATE TABLE draft (
     id TEXT PRIMARY KEY,
     round NUMERIC,
@@ -431,5 +450,10 @@ CREATE TABLE draft (
     displayabbrev_default TEXT,
     firstname_default TEXT,
     lastname_default TEXT,
+    firstname_cs TEXT,
+    firstname_sk TEXT,
+    lastname_cs TEXT,
+    lastname_fi TEXT,
+    lastname_sk TEXT,
     teamcommonname_fr TEXT
 );
