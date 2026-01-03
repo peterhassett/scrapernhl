@@ -22,7 +22,7 @@ LOG = logging.getLogger(__name__)
 # Supabase Configuration
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
-# Local cache for schema-compliant columns
+# Local cache for schema-compliant columns based on final_schema.sql
 DB_COLS = {}
 
 def get_valid_cols(table_name):
@@ -46,15 +46,15 @@ def literal_sync(table_name, df, p_key):
     # 1. Column Alignment (dots to underscores, lowercase)
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
-    # 2. Strict Whitelist Filtering based on SQL Schema
+    # 2. Strict Whitelist Filtering based on your final_schema.sql
     valid = get_valid_cols(table_name)
     if valid:
         df = df[[c for c in df.columns if c in valid]]
     
-    # 3. CRITICAL: Manual NAType and Float Sanitation
-    # pd.isna() captures standard NaN, None, and the problematic pandas 2.0 NAType sentinel
+    # 3. THE FIX: Hardware-level conversion to standard Python types
+    # Manually mapping every pandas-specific null (like NAType) to standard Python None
     def clean_cell(val):
-        if pd.isna(val): return None
+        if pd.isna(val): return None # Catches NaN, None, and the problematic NAType
         if isinstance(val, (np.integer, int)): return int(val)
         if isinstance(val, (np.floating, float)): return float(val)
         return val
@@ -83,7 +83,7 @@ def literal_sync(table_name, df, p_key):
 
 def run_sync(mode="daily"):
     S_STR, S_INT = "20252026", 20252026
-    LOG.info(f"--- STARTING GLOBAL SYNC | Mode: {mode} ---")
+    LOG.info(f"--- STARTING PRODUCTION SYNC | Mode: {mode} ---")
 
     # 1. Base Tables
     literal_sync("teams", scrapeTeams(source="calendar"), "id")
@@ -91,10 +91,11 @@ def run_sync(mode="daily"):
     std = scrapeStandings()
     if not std.empty:
         std.columns = [str(c).replace('.', '_').lower() for c in std.columns]
+        # Create unique ID for standings (date + team)
         std['id'] = std['date'].astype(str) + "_" + std['teamabbrev_default'].astype(str)
         literal_sync("standings", std, "id")
 
-    # 2. Discovery Phase
+    # 2. Team Discovery Phase
     teams_df = scrapeTeams(source="calendar")
     active_teams = ['MTL', 'BUF'] if mode == "debug" else teams_df['abbrev'].unique().tolist()
     global_games = set()
@@ -112,6 +113,7 @@ def run_sync(mode="daily"):
         # Capture Regular Season Game IDs (GameType 2)
         sched = scrapeSchedule(team, S_STR)
         sched.columns = [str(c).replace('.', '_').lower() for c in sched.columns]
+        # Filtering for Regular Season (GameType 2) and Finished games
         sched_f = sched[(sched['gametype'] == 2) & (sched['gamestate'].isin(['FINAL', 'OFF']))]
         global_games.update(sched_f['id'].tolist())
 
@@ -123,14 +125,15 @@ def run_sync(mode="daily"):
     for gid in game_list:
         try:
             LOG.info(f"Ingesting Analytics for Game: {gid}")
-            # Use modern scrapePlays to bypass legacy 404s
+            # Use modern scrapePlays from games.py
             pbp = predict_xg_for_pbp(engineer_xg_features(scrapePlays(gid)))
             
             # Sync Individual Plays
             p_df = pbp.copy()
             if '#' in p_df.columns: p_df = p_df.rename(columns={'#': 'sortorder'})
             p_df['id'] = f"{gid}_{p_df['sortorder']}"
-            # raw_data JSONB catch-all for any metadata outside the schema
+            
+            # Use raw_data JSONB catch-all for play metadata (defined in final_schema.sql)
             p_df['raw_data'] = p_df.apply(lambda r: json.dumps(r.to_dict(), default=str), axis=1)
             literal_sync("plays", p_df, "id")
 
@@ -145,12 +148,12 @@ def run_sync(mode="daily"):
         combined = pd.concat(all_game_stats)
         combined.columns = [str(c).replace('.', '_').lower() for c in combined.columns]
         
-        # Identity Registration for call-ups/trades missing from active roster
+        # Identity Registration for call-ups/trades missing from current active roster
         u_pids = combined[['player1id', 'player1name']].dropna().drop_duplicates()
         u_pids = u_pids.rename(columns={'player1name': 'firstname_default', 'player1id': 'id'})
         literal_sync("players", u_pids, "id")
 
-        # Seasonal Rollup
+        # Seasonal Global Aggregate for player_stats
         agg = combined.groupby(['player1id', 'player1name', 'eventteam', 'strength']).sum(numeric_only=True).reset_index()
         agg['season'] = S_INT
         agg['id'] = agg.apply(lambda r: f"{int(r.player1id)}_{S_INT}_{r.strength}", axis=1)
