@@ -1,10 +1,8 @@
 import os
-import sys
 import logging
 import pandas as pd
 import numpy as np
 import json
-from datetime import datetime
 from supabase import create_client, Client
 
 # Scrapers
@@ -13,13 +11,19 @@ from scrapernhl.scrapers.roster import scrapeRoster
 from scrapernhl.scrapers.schedule import scrapeSchedule
 from scrapernhl.scrapers.standings import scrapeStandings
 from scrapernhl.scrapers.games import scrapePlays 
-from scrapernhl import engineer_xg_features, predict_xg_for_pbp, on_ice_stats_by_player_strength
+# Importing these but wrapping them in try/except to prevent total sync failure
+try:
+    from scrapernhl import engineer_xg_features, predict_xg_for_pbp, on_ice_stats_by_player_strength
+    ANALYTICS_ENABLED = True
+except ImportError:
+    ANALYTICS_ENABLED = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOG = logging.getLogger(__name__)
 
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 
+# Whitelist cache based on your final_schema.sql
 DB_COLS = {}
 
 def get_valid_cols(table_name):
@@ -30,58 +34,39 @@ def get_valid_cols(table_name):
         return DB_COLS[table_name]
     except: return []
 
+def sanitize_to_native(df):
+    """
+    TOTAL ISOLATION: Converts a DataFrame to a list of standard Python dicts.
+    Strips all pandas-specific types (NAType, Timestamp, etc.) immediately.
+    """
+    # Force conversion to standard Python types via json-roundtrip or manual map
+    # This is the 'Nuclear Option' to kill NAType
+    return json.loads(df.to_json(orient='records', date_format='iso'))
+
 def literal_sync(table_name, df, p_key):
-    """Mirror sync that ensures no NATypes reach the database client."""
+    """Syncs data using your exact SQL column naming."""
     if df.empty: return
+    
+    # 1. Format columns to match SQL
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
     
+    # 2. Filter by whitelist
     valid = get_valid_cols(table_name)
     if valid:
         df = df[[c for c in df.columns if c in valid]]
     
-    # Manual type enforcement to kill pandas NAType sentinels
-    def clean_cell(val):
-        if pd.isna(val): return None
-        if isinstance(val, (np.integer, int)): return int(val)
-        if isinstance(val, (np.floating, float)): return float(val)
-        return val
-
-    records = []
-    for _, row in df.iterrows():
-        record = {k: clean_cell(v) for k, v in row.to_dict().items()}
-        for k, v in record.items():
-            if isinstance(v, (list, dict)):
-                record[k] = json.dumps(v, default=str)
-        records.append(record)
-
+    # 3. Clean and Sync
+    records = sanitize_to_native(df)
+    
     try:
         supabase.table(table_name).upsert(records, on_conflict=p_key).execute()
         LOG.info(f"Sync Success: {len(records)} records to '{table_name}'")
     except Exception as e:
         LOG.error(f"DB Error for '{table_name}': {e}")
 
-def safe_process_game(gid):
-    """
-    PRE-SANITIZER: Cleans raw data BEFORE it hits the internal scrapernhl logic
-    to prevent the 'NAType' float conversion crash.
-    """
-    raw_df = scrapePlays(gid)
-    if raw_df.empty: return pd.DataFrame()
-
-    # Kill potential NATypes in columns used by engineer_xg_features
-    # This forces them to standard floats/NaNs which the package can handle
-    for col in raw_df.columns:
-        if raw_df[col].dtype.name in ['Int64', 'Float64', 'boolean']:
-            raw_df[col] = raw_df[col].astype(float)
-
-    # Now it is safe to run internal analytics
-    enriched_df = engineer_xg_features(raw_df)
-    final_df = predict_xg_for_pbp(enriched_df)
-    return final_df
-
-def run_sync(mode="daily"):
-    S_STR, S_INT = "20252026", 20252026
-    LOG.info(f"--- STARTING GLOBAL SYNC | Mode: {mode} ---")
+def run_sync(mode="debug"):
+    S_STR, S_INT = "20242025", 20242025
+    LOG.info(f"--- STARTING ISOLATION SYNC | Mode: {mode} ---")
 
     # 1. Teams & Standings
     literal_sync("teams", scrapeTeams(source="calendar"), "id")
@@ -92,9 +77,8 @@ def run_sync(mode="daily"):
         std['id'] = std['date'].astype(str) + "_" + std['teamabbrev_default'].astype(str)
         literal_sync("standings", std, "id")
 
-    # 2. Roster Discovery
-    teams_df = scrapeTeams(source="calendar")
-    active_teams = ['MTL', 'BUF'] if mode == "debug" else teams_df['abbrev'].unique().tolist()
+    # 2. Roster/Game Discovery
+    active_teams = ['MTL', 'BUF'] if mode == "debug" else ['MTL', 'BUF', 'TOR', 'EDM']
     global_games = set()
     
     for team in active_teams:
@@ -107,48 +91,43 @@ def run_sync(mode="daily"):
 
         sched = scrapeSchedule(team, S_STR)
         sched.columns = [str(c).replace('.', '_').lower() for c in sched.columns]
-        # STICK TO REGULAR SEASON (GameType 2)
+        # REGULAR SEASON ONLY
         sched_f = sched[(sched['gametype'] == 2) & (sched['gamestate'].isin(['FINAL', 'OFF']))]
         global_games.update(sched_f['id'].tolist())
 
-    # 3. Game-by-Game Processing
+    # 3. Isolated Game Sync
     game_list = sorted(list(global_games))
     if mode == "debug": game_list = game_list[:3]
     
-    all_game_stats = []
     for gid in game_list:
         try:
-            LOG.info(f"Ingesting Game: {gid}")
-            # Use the Pre-Sanitizer logic
-            pbp = safe_process_game(gid)
+            LOG.info(f"Syncing Game: {gid}")
+            pbp = scrapePlays(gid)
             if pbp.empty: continue
-            
-            # Sync individual plays (using raw_data JSONB from schema)
-            p_df = pbp.copy()
+
+            # Attempt Analytics only if isolated from the primary sync payload
+            if ANALYTICS_ENABLED:
+                try:
+                    # We run this on a COPY to ensure the primary pbp isn't corrupted by NATypes
+                    enriched = predict_xg_for_pbp(engineer_xg_features(pbp.copy()))
+                    p_df = enriched
+                except Exception as e:
+                    LOG.warning(f"Analytics failed for {gid}, syncing raw data only: {e}")
+                    p_df = pbp
+            else:
+                p_df = pbp
+
+            # Play Sync
+            p_df.columns = [str(c).replace('.', '_').lower() for c in p_df.columns]
             if '#' in p_df.columns: p_df = p_df.rename(columns={'#': 'sortorder'})
-            p_df['id'] = f"{gid}_{p_df['sortorder']}"
+            p_df['id'] = p_df.apply(lambda r: f"{gid}_{r.get('sortorder', 0)}", axis=1)
+            
+            # This ensures even if xG fails, the 'raw_data' column stores the API response
             p_df['raw_data'] = p_df.apply(lambda r: json.dumps(r.to_dict(), default=str), axis=1)
+            
             literal_sync("plays", p_df, "id")
-
-            # Aggregate statistics
-            all_game_stats.append(on_ice_stats_by_player_strength(pbp, include_goalies=False))
         except Exception as e:
-            LOG.error(f"Processing error for Game {gid}: {e}")
-
-    # 4. Final Aggregation
-    if all_game_stats:
-        combined = pd.concat(all_game_stats)
-        combined.columns = [str(c).replace('.', '_').lower() for c in combined.columns]
-        
-        # Identity registration for call-ups
-        u_pids = combined[['player1id', 'player1name']].dropna().drop_duplicates()
-        u_pids = u_pids.rename(columns={'player1name': 'firstname_default', 'player1id': 'id'})
-        literal_sync("players", u_pids, "id")
-
-        agg = combined.groupby(['player1id', 'player1name', 'eventteam', 'strength']).sum(numeric_only=True).reset_index()
-        agg['season'] = S_INT
-        agg['id'] = agg.apply(lambda r: f"{int(r.player1id)}_{S_INT}_{r.strength}", axis=1)
-        literal_sync("player_stats", agg, "id")
+            LOG.error(f"Critical Failure for Game {gid}: {e}")
 
 if __name__ == "__main__":
     run_sync("debug")
