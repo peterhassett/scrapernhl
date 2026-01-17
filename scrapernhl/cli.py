@@ -167,7 +167,8 @@ def standings(date, output, format):
 @click.option('--output', '-o', help='Output file path')
 @click.option('--format', '-f', type=click.Choice(['csv', 'json', 'parquet', 'excel']), 
               default='csv', help='Output format')
-def roster(team, season, output, format):
+@click.option('--db-schema', is_flag=True, help='Output only columns matching DB schema and clean data')
+def roster(team, season, output, format, db_schema):
     """
     Scrape team roster.
     
@@ -180,16 +181,15 @@ def roster(team, season, output, format):
     
     try:
         roster_df = scrapeRoster(team, season)
-        
+        if db_schema:
+            roster_df = clean_and_align_df(roster_df, table_name="rosters")
         if output:
             output_path = Path(output)
         else:
             output_path = Path(f"{team.lower()}_roster_{season}.{format}")
-        
         _save_dataframe(roster_df, output_path, format)
         click.echo(f"✅ Successfully scraped {len(roster_df)} players")
         click.echo(f"📁 Saved to: {output_path}")
-        
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         sys.exit(1)
