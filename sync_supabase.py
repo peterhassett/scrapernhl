@@ -181,53 +181,78 @@ def run_sync(mode="daily"):
     for gid in game_list:
         try:
             LOG.info(f"Ingesting Analytics for Game: {gid}")
-            # Enrichment step
-            pbp_raw = scrapePlays(gid)
-            print("==== pbp_raw.info() ====")
-            print(pbp_raw.info())
-            print("==== pbp_raw.head(10) ====")
-            print(pbp_raw.head(10))
-            if not pbp_raw.empty:
-                print("==== pbp_raw.iloc[0].to_dict() ====")
-                print(pbp_raw.iloc[0].to_dict())
+            if df.empty:
+                LOG.warning(f"[{table_name}] DataFrame is empty, skipping sync.")
+                return
 
-            pbp_clean = clean_dataframe_for_analytics(pbp_raw)
-            print("==== pbp_clean.info() ====")
-            print(pbp_clean.info())
-            print("==== pbp_clean.head(10) ====")
-            print(pbp_clean.head(10))
-            if not pbp_clean.empty:
-                print("==== pbp_clean.iloc[0].to_dict() ====")
-                print(pbp_clean.iloc[0].to_dict())
+            # 1. Column Alignment (dots to underscores, lowercase)
+            df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
 
-            pbp_features = engineer_xg_features(pbp_clean)
-            print("==== pbp_features.info() ====")
-            print(pbp_features.info())
-            print("==== pbp_features.head(10) ====")
-            print(pbp_features.head(10))
-            if not pbp_features.empty:
-                print("==== pbp_features.iloc[0].to_dict() ====")
-                print(pbp_features.iloc[0].to_dict())
+            # 2. Whitelist Filtering: Only keep columns that exist in your SQL schema
+            valid = get_valid_cols(table_name)
+            if valid:
+                original_cols = set(df.columns)
+                valid_set = set(valid)
+                drop_cols = original_cols - valid_set
+                if drop_cols:
+                    LOG.info(f"[{table_name}] Dropping columns not in DB schema: {sorted(drop_cols)}")
+                df = df[[c for c in df.columns if c in valid]]
+            else:
+                LOG.warning(f"[{table_name}] No valid columns found in DB schema; skipping sync.")
+                return
 
-            pbp_features = clean_dataframe_for_analytics(pbp_features)
-            pbp = predict_xg_for_pbp(pbp_features)
-            print("==== pbp.info() ====")
-            print(pbp.info())
-            print("==== pbp.head(10) ====")
-            print(pbp.head(10))
-            if not pbp.empty:
-                print("==== pbp.iloc[0].to_dict() ====")
-                print(pbp.iloc[0].to_dict())
+            # 3. Explicit type casting (optional: customize per table/column as needed)
+            # Example: enforce int for id columns, float for numeric, str for text
+            for col in df.columns:
+                if col.endswith('id') or col in ('id', 'season'):
+                    try:
+                        df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+                    except Exception:
+                        pass
+                elif df[col].dtype.kind in 'fiu':
+                    try:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        df[col] = df[col].astype(str).replace({"<NA>": "", "nan": "", "None": ""})
+                    except Exception:
+                        pass
 
-            pbp = clean_dataframe_for_analytics(pbp)
+            # 4. Primary Key Null Check
+            pk_list = [k.strip() for k in p_key.split(',')]
+            if df[pk_list].isnull().any().any():
+                LOG.error(f"[{table_name}] Null value(s) in primary key columns: {pk_list}. Skipping sync.")
+                return
 
-            # Aggregate stats
-            stats_clean = clean_dataframe_for_analytics(pbp)
-            print("==== stats_clean.info() ====")
-            print(stats_clean.info())
-            print("==== stats_clean.head(10) ====")
-            print(stats_clean.head(10))
-            if not stats_clean.empty:
+            # 5. CRITICAL: Manual NAType and Float Sanitation
+            def clean_cell(val):
+                if pd.isna(val): return None
+                if isinstance(val, (np.integer, int)): return int(val)
+                if isinstance(val, (np.floating, float)): return float(val)
+                return val
+
+            records = []
+            for _, row in df.iterrows():
+                # Clean every cell to ensure standard types reach the DB driver
+                record = {k: clean_cell(v) for k, v in row.to_dict().items()}
+
+                # 6. JSONB Serialization for columns like 'teams' or 'tvbroadcasts'
+                for k, v in record.items():
+                    if isinstance(v, (list, dict)):
+                        record[k] = json.dumps(v, default=str)
+                records.append(record)
+
+            # 7. Deduplicate Payload
+            unique_map = {tuple(r.get(k) for k in pk_list): r for r in records}
+            payload = list(unique_map.values())
+
+            try:
+                supabase.table(table_name).upsert(payload, on_conflict=p_key).execute()
+                LOG.info(f"Sync Success: {len(payload)} records to '{table_name}'")
+            except Exception as e:
+                LOG.error(f"Sync Failure for '{table_name}': {e}")
                 print("==== stats_clean.iloc[0].to_dict() ====")
                 print(stats_clean.iloc[0].to_dict())
 
