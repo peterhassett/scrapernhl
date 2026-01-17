@@ -97,6 +97,7 @@ def teams(output, format, polars, db_schema):
               default='csv', help='Output format')
 @click.option('--db-schema', is_flag=True, help='Output only columns matching DB schema and clean data')
 def schedule(team, season, output, format, db_schema):
+        from scrapernhl.scrapers.schedule import scrapeSchedule
     try:
         schedule_df = scrapeSchedule(team, season)
         if db_schema:
@@ -131,7 +132,8 @@ def schedule(team, season, output, format, db_schema):
 @click.option('--output', '-o', help='Output file path')
 @click.option('--format', '-f', type=click.Choice(['csv', 'json', 'parquet', 'excel']), 
               default='csv', help='Output format')
-def standings(date, output, format):
+@click.option('--db-schema', is_flag=True, help='Output only columns matching DB schema and clean data')
+def standings(date, output, format, db_schema):
     """
     Scrape NHL standings.
     
@@ -146,16 +148,15 @@ def standings(date, output, format):
     
     try:
         standings_df = scrapeStandings(date)
-        
+        if db_schema:
+            standings_df = clean_and_align_df(standings_df, table_name="standings")
         if output:
             output_path = Path(output)
         else:
             output_path = Path(f"nhl_standings_{date}.{format}")
-        
         _save_dataframe(standings_df, output_path, format)
         click.echo(f"✅ Successfully scraped standings for {len(standings_df)} teams")
         click.echo(f"📁 Saved to: {output_path}")
-        
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         sys.exit(1)
@@ -203,7 +204,8 @@ def roster(team, season, output, format, db_schema):
 @click.option('--output', '-o', help='Output file path')
 @click.option('--format', '-f', type=click.Choice(['csv', 'json', 'parquet', 'excel']), 
               default='csv', help='Output format')
-def stats(team, season, goalies, session, output, format):
+@click.option('--db-schema', is_flag=True, help='Output only columns matching DB schema and clean data')
+def stats(team, season, goalies, session, output, format, db_schema):
     """
     Scrape team player statistics.
     
@@ -217,16 +219,15 @@ def stats(team, season, goalies, session, output, format):
     
     try:
         stats_df = scrapeTeamStats(team, season, session=session, goalies=goalies)
-        
+        if db_schema:
+            stats_df = clean_and_align_df(stats_df, table_name="player_stats")
         if output:
             output_path = Path(output)
         else:
             output_path = Path(f"{team.lower()}_{player_type}_{season}.{format}")
-        
         _save_dataframe(stats_df, output_path, format)
         click.echo(f"✅ Successfully scraped stats for {len(stats_df)} {player_type}")
         click.echo(f"📁 Saved to: {output_path}")
-        
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         sys.exit(1)
