@@ -1,3 +1,12 @@
+# Universal DataFrame cleaning to handle NAType, NaN, None before analytics
+def clean_dataframe_for_analytics(df):
+    # Replace pd.NA, np.nan, None with np.nan for all numeric columns
+    for col in df.select_dtypes(include=["number", "float", "int"]).columns:
+        df[col] = df[col].apply(lambda x: np.nan if pd.isna(x) else x)
+    # For all other columns, replace pd.NA/None with empty string
+    for col in df.select_dtypes(exclude=["number", "float", "int"]).columns:
+        df[col] = df[col].apply(lambda x: "" if pd.isna(x) else x)
+    return df
 import os
 import sys
 import logging
@@ -137,10 +146,13 @@ def run_sync(mode="daily"):
         try:
             LOG.info(f"Ingesting Analytics for Game: {gid}")
             # Enrichment step
-            pbp = predict_xg_for_pbp(engineer_xg_features(scrapePlays(gid)))
-            
+            pbp_raw = scrapePlays(gid)
+            pbp_clean = clean_dataframe_for_analytics(pbp_raw)
+            pbp = predict_xg_for_pbp(engineer_xg_features(pbp_clean))
+
             # Aggregate stats
-            all_game_stats.append(on_ice_stats_by_player_strength(pbp, include_goalies=False))
+            stats_clean = clean_dataframe_for_analytics(pbp)
+            all_game_stats.append(on_ice_stats_by_player_strength(stats_clean, include_goalies=False))
             LOG.info(f"Analytics completed for game {gid}")
         except Exception as e:
             LOG.error(f"Processing error for Game {gid}: {e}")
