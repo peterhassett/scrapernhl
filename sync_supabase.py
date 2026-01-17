@@ -1,11 +1,27 @@
 # Universal DataFrame cleaning to handle NAType, NaN, None before analytics
 def clean_dataframe_for_analytics(df):
-    # Replace pd.NA, np.nan, None with np.nan for all numeric columns
-    for col in df.select_dtypes(include=["number", "float", "int"]).columns:
-        df[col] = df[col].apply(lambda x: np.nan if pd.isna(x) else x)
-    # For all other columns, replace pd.NA/None with empty string
-    for col in df.select_dtypes(exclude=["number", "float", "int"]).columns:
-        df[col] = df[col].apply(lambda x: "" if pd.isna(x) else x)
+    """
+    Aggressively clean DataFrame for analytics:
+    - Coerce all columns to numeric where possible (errors become np.nan)
+    - Replace pd.NA/None in non-numeric columns with empty string
+    - Log columns that could not be converted to numeric
+    """
+    import warnings
+    df = df.copy()
+    non_numeric_cols = []
+    for col in df.columns:
+        # Try to convert to numeric, if fails, keep as object
+        try:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            # If all values are nan after conversion, treat as non-numeric
+            if df[col].isna().all():
+                non_numeric_cols.append(col)
+                df[col] = df[col].astype(str).replace({"<NA>": "", "nan": "", "None": ""})
+        except Exception:
+            non_numeric_cols.append(col)
+            df[col] = df[col].astype(str).replace({"<NA>": "", "nan": "", "None": ""})
+    if non_numeric_cols:
+        LOG.info(f"[CLEAN] Non-numeric columns (left as string): {sorted(non_numeric_cols)}")
     return df
 import os
 import sys
@@ -148,7 +164,10 @@ def run_sync(mode="daily"):
             # Enrichment step
             pbp_raw = scrapePlays(gid)
             pbp_clean = clean_dataframe_for_analytics(pbp_raw)
-            pbp = predict_xg_for_pbp(engineer_xg_features(pbp_clean))
+            pbp_features = engineer_xg_features(pbp_clean)
+            pbp_features = clean_dataframe_for_analytics(pbp_features)
+            pbp = predict_xg_for_pbp(pbp_features)
+            pbp = clean_dataframe_for_analytics(pbp)
 
             # Aggregate stats
             stats_clean = clean_dataframe_for_analytics(pbp)
