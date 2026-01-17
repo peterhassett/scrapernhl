@@ -1,3 +1,38 @@
+import os
+import pandas as pd
+import numpy as np
+
+# Helper: get valid columns from DB schema (Supabase/Postgres)
+def get_valid_cols(table_name):
+    from supabase import create_client
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+    if not supabase_url or not supabase_key:
+        return None
+    supabase = create_client(supabase_url, supabase_key)
+    try:
+        res = supabase.table(table_name).select("*").limit(1).execute()
+        return list(res.data[0].keys()) if res.data else []
+    except Exception:
+        return None
+
+# Helper: clean and align DataFrame to DB schema
+def clean_and_align_df(df, table_name=None):
+    df = df.copy()
+    # Replace pd.NA with np.nan everywhere
+    df = df.replace({pd.NA: np.nan})
+    # Coerce all columns to numeric where possible
+    for col in df.columns:
+        try:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        except Exception:
+            pass
+    # If table_name is given, filter columns to DB schema
+    if table_name:
+        valid = get_valid_cols(table_name)
+        if valid:
+            df = df[[c for c in df.columns if c in valid]]
+    return df
 """
 Command-line interface for scrapernhl.
 
@@ -30,7 +65,8 @@ def cli():
 @click.option('--format', '-f', type=click.Choice(['csv', 'json', 'parquet', 'excel']), 
               default='csv', help='Output format')
 @click.option('--polars', is_flag=True, help='Use Polars instead of Pandas')
-def teams(output, format, polars):
+@click.option('--db-schema', is_flag=True, help='Output only columns matching DB schema and clean data')
+def teams(output, format, polars, db_schema):
     """Scrape all NHL teams."""
     from scrapernhl.scrapers.teams import scrapeTeams
     
@@ -39,16 +75,15 @@ def teams(output, format, polars):
     
     try:
         teams_df = scrapeTeams(output_format=output_format)
-        
+        if db_schema:
+            teams_df = clean_and_align_df(teams_df, table_name="teams")
         if output:
             output_path = Path(output)
         else:
             output_path = Path(f"nhl_teams.{format}")
-        
         _save_dataframe(teams_df, output_path, format, polars)
         click.echo(f"✅ Successfully scraped {len(teams_df)} teams")
         click.echo(f"📁 Saved to: {output_path}")
-        
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         sys.exit(1)
@@ -60,19 +95,22 @@ def teams(output, format, polars):
 @click.option('--output', '-o', help='Output file path')
 @click.option('--format', '-f', type=click.Choice(['csv', 'json', 'parquet', 'excel']), 
               default='csv', help='Output format')
-def schedule(team, season, output, format):
-    """
-    Scrape team schedule.
-    
-    TEAM: Team abbreviation (e.g., MTL, TOR, BOS)
-    SEASON: Season string (e.g., 20252026)
-    """
-    from scrapernhl.scrapers.schedule import scrapeSchedule
-    
-    click.echo(f"Scraping {team} schedule for {season}...")
-    
+@click.option('--db-schema', is_flag=True, help='Output only columns matching DB schema and clean data')
+def schedule(team, season, output, format, db_schema):
     try:
         schedule_df = scrapeSchedule(team, season)
+        if db_schema:
+            schedule_df = clean_and_align_df(schedule_df, table_name="schedule")
+        if output:
+            output_path = Path(output)
+        else:
+            output_path = Path(f"{team}_schedule_{season}.{format}")
+        _save_dataframe(schedule_df, output_path, format, False)
+        click.echo(f"✅ Successfully scraped {len(schedule_df)} games")
+        click.echo(f"📁 Saved to: {output_path}")
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
         
         if output:
             output_path = Path(output)

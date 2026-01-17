@@ -1,3 +1,4 @@
+import subprocess
 # Utility: Safe float conversion
 def safe_float(val):
     try:
@@ -135,9 +136,12 @@ def run_sync(mode="daily"):
     S_STR, S_INT = "20242025", 20242025
     LOG.info(f"--- STARTING PRODUCTION SYNC | Mode: {mode} ---")
 
-    # 1. Base Tables (Teams, Standings)
-    literal_sync("teams", scrapeTeams(source="calendar"), "id")
-    
+    # 1. Base Tables (Teams, Standings) - Use CLI to generate clean files
+    subprocess.run(["python", "-m", "scrapernhl.cli", "teams", "--db-schema", "--output", "teams.csv"], check=True)
+    teams_df = pd.read_csv("teams.csv")
+    literal_sync("teams", teams_df, "id")
+
+    # Standings: fallback to in-process for now (can be CLI-ized if needed)
     std = scrapeStandings()
     if not std.empty:
         std.columns = [str(c).replace('.', '_').lower() for c in std.columns]
@@ -145,22 +149,26 @@ def run_sync(mode="daily"):
         literal_sync("standings", std, "id")
 
     # 2. Roster and Schedule Discovery
-    teams_df = scrapeTeams(source="calendar")
+    # Use CLI to generate clean rosters and schedules for each team
     active_teams = ['MTL', 'BUF'] if mode == "debug" else teams_df['abbrev'].unique().tolist()
     global_games = set()
-    
+
     for team in active_teams:
         LOG.info(f"Processing context for team: {team}")
-        ros = scrapeRoster(team, S_STR)
+        # Roster
+        roster_out = f"{team}_roster.csv"
+        subprocess.run(["python", "-m", "scrapernhl.cli", "roster", team, S_STR, "--db-schema", "--output", roster_out], check=True)
+        ros = pd.read_csv(roster_out)
         if not ros.empty:
             ros['season'] = S_INT
             ros['teamabbrev'] = team
             literal_sync("players", ros.copy(), "id")
-            # Rosters uses Composite Key (id, season)
             literal_sync("rosters", ros, "id,season")
 
-        sched = scrapeSchedule(team, S_STR)
-        sched.columns = [str(c).replace('.', '_').lower() for c in sched.columns]
+        # Schedule
+        sched_out = f"{team}_schedule.csv"
+        subprocess.run(["python", "-m", "scrapernhl.cli", "schedule", team, S_STR, "--db-schema", "--output", sched_out], check=True)
+        sched = pd.read_csv(sched_out)
         # Filter strictly for Regular Season (GameType 2)
         sched_f = sched[(sched['gametype'] == 2) & (sched['gamestate'].isin(['FINAL', 'OFF']))]
         global_games.update(sched_f['id'].tolist())
