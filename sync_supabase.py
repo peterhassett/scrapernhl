@@ -44,16 +44,25 @@ def literal_sync(table_name, df, p_key):
     Synchronizes DataFrame to Supabase with strict column alignment.
     Ignores extra data to prevent PGRST204 errors and neutralizes NAType.
     """
-    if df.empty: return
-    
+    if df.empty:
+        return
+
     # 1. Column Alignment (dots to underscores, lowercase)
     df.columns = [str(c).replace('.', '_').lower() for c in df.columns]
-    
+
     # 2. Whitelist Filtering: Only keep columns that exist in your SQL schema
     valid = get_valid_cols(table_name)
     if valid:
+        original_cols = set(df.columns)
+        valid_set = set(valid)
+        drop_cols = original_cols - valid_set
+        if drop_cols:
+            LOG.info(f"[{table_name}] Dropping columns not in DB schema: {sorted(drop_cols)}")
         df = df[[c for c in df.columns if c in valid]]
-    
+    else:
+        LOG.warning(f"[{table_name}] No valid columns found in DB schema; skipping sync.")
+        return
+
     # 3. CRITICAL: Manual NAType and Float Sanitation
     # Converts pandas 2.0 NAType sentinels to standard Python None
     def clean_cell(val):
@@ -66,7 +75,7 @@ def literal_sync(table_name, df, p_key):
     for _, row in df.iterrows():
         # Clean every cell to ensure standard types reach the DB driver
         record = {k: clean_cell(v) for k, v in row.to_dict().items()}
-        
+
         # 4. JSONB Serialization for columns like 'teams' or 'tvbroadcasts'
         for k, v in record.items():
             if isinstance(v, (list, dict)):

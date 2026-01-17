@@ -1,0 +1,63 @@
+# GitHub Actions Workflow: Nightly and Catch-up Scraper Jobs
+
+This workflow runs the NHL scraper and syncs data to the database. It supports both a nightly job (for the previous day's data) and a catch-up job (for historical/backfill data).
+
+- The season value is passed as an environment variable or workflow input.
+- The database can be Supabase/Postgres or another supported backend.
+- Numeric data is preserved for analytics.
+
+See README.md and docs/PROJECT_REFERENCE.md for more details.
+
+---
+
+```yaml
+name: ScraperNHL Data Sync
+
+on:
+  schedule:
+    # Nightly at 3:00 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Sync mode (daily, catchup, debug)'
+        required: false
+        default: 'daily'
+      season:
+        description: 'Season (e.g., 20252026)'
+        required: false
+        default: ''
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      # Optionally set SEASON here or pass as input
+      SEASON: ${{ github.event.inputs.season }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run sync script
+        run: |
+          MODE=${{ github.event.inputs.mode || 'daily' }}
+          SEASON_ARG=""
+          if [ -n "$SEASON" ]; then
+            SEASON_ARG="--season $SEASON"
+          fi
+          python sync_supabase.py $MODE $SEASON_ARG
+```
+
+---
+
+- Place this file in `.github/workflows/scraper_sync.yml`.
+- Adjust environment variables and secrets as needed for your database.
+- For catch-up jobs, trigger manually via GitHub Actions UI and specify the mode and season.
