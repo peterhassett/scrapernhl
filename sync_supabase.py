@@ -175,14 +175,54 @@ def run_sync(mode="daily"):
             LOG.info(f"Ingesting Analytics for Game: {gid}")
             # Enrichment step
             pbp_raw = scrapePlays(gid)
+            print("==== pbp_raw.info() ====")
+            print(pbp_raw.info())
+            print("==== pbp_raw.head(10) ====")
+            print(pbp_raw.head(10))
+            if not pbp_raw.empty:
+                print("==== pbp_raw.iloc[0].to_dict() ====")
+                print(pbp_raw.iloc[0].to_dict())
+
             pbp_clean = clean_dataframe_for_analytics(pbp_raw)
+            print("==== pbp_clean.info() ====")
+            print(pbp_clean.info())
+            print("==== pbp_clean.head(10) ====")
+            print(pbp_clean.head(10))
+            if not pbp_clean.empty:
+                print("==== pbp_clean.iloc[0].to_dict() ====")
+                print(pbp_clean.iloc[0].to_dict())
+
             pbp_features = engineer_xg_features(pbp_clean)
+            print("==== pbp_features.info() ====")
+            print(pbp_features.info())
+            print("==== pbp_features.head(10) ====")
+            print(pbp_features.head(10))
+            if not pbp_features.empty:
+                print("==== pbp_features.iloc[0].to_dict() ====")
+                print(pbp_features.iloc[0].to_dict())
+
             pbp_features = clean_dataframe_for_analytics(pbp_features)
             pbp = predict_xg_for_pbp(pbp_features)
+            print("==== pbp.info() ====")
+            print(pbp.info())
+            print("==== pbp.head(10) ====")
+            print(pbp.head(10))
+            if not pbp.empty:
+                print("==== pbp.iloc[0].to_dict() ====")
+                print(pbp.iloc[0].to_dict())
+
             pbp = clean_dataframe_for_analytics(pbp)
 
             # Aggregate stats
             stats_clean = clean_dataframe_for_analytics(pbp)
+            print("==== stats_clean.info() ====")
+            print(stats_clean.info())
+            print("==== stats_clean.head(10) ====")
+            print(stats_clean.head(10))
+            if not stats_clean.empty:
+                print("==== stats_clean.iloc[0].to_dict() ====")
+                print(stats_clean.iloc[0].to_dict())
+
             all_game_stats.append(on_ice_stats_by_player_strength(stats_clean, include_goalies=False))
             LOG.info(f"Analytics completed for game {gid}")
         except Exception as e:
