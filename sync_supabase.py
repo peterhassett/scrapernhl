@@ -1,13 +1,25 @@
+# Utility: Safe float conversion
+def safe_float(val):
+    try:
+        if pd.isna(val):
+            return np.nan
+        return float(val)
+    except Exception:
+        return np.nan
+
 # Universal DataFrame cleaning to handle NAType, NaN, None before analytics
 def clean_dataframe_for_analytics(df):
     """
-    Aggressively clean DataFrame for analytics:
+    Bulletproof DataFrame cleaning for analytics:
+    - Replace all pd.NA with np.nan (regardless of dtype)
     - Coerce all columns to numeric where possible (errors become np.nan)
     - Replace pd.NA/None in non-numeric columns with empty string
     - Log columns that could not be converted to numeric
     """
     import warnings
     df = df.copy()
+    # Replace all pd.NA with np.nan everywhere
+    df = df.replace({pd.NA: np.nan})
     non_numeric_cols = []
     for col in df.columns:
         # Try to convert to numeric, if fails, keep as object
