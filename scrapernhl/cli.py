@@ -92,7 +92,7 @@ def teams(output, format, polars, db_schema):
               default='csv', help='Output format')
 @click.option('--db-schema', is_flag=True, help='Output only columns matching DB schema and clean data')
 def schedule(team, season, output, format, db_schema):
-        from scrapernhl.scrapers.schedule import scrapeSchedule
+    from scrapernhl.scrapers.schedule import scrapeSchedule
     try:
         schedule_df = scrapeSchedule(team, season)
         if db_schema:
@@ -104,19 +104,6 @@ def schedule(team, season, output, format, db_schema):
         _save_dataframe(schedule_df, output_path, format, False)
         click.echo(f"✅ Successfully scraped {len(schedule_df)} games")
         click.echo(f"📁 Saved to: {output_path}")
-    except Exception as e:
-        click.echo(f"❌ Error: {e}", err=True)
-        sys.exit(1)
-        
-        if output:
-            output_path = Path(output)
-        else:
-            output_path = Path(f"{team.lower()}_schedule_{season}.{format}")
-        
-        _save_dataframe(schedule_df, output_path, format)
-        click.echo(f"✅ Successfully scraped {len(schedule_df)} games")
-        click.echo(f"📁 Saved to: {output_path}")
-        
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         sys.exit(1)
