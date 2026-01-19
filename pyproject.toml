@@ -97,7 +97,7 @@ addopts = [
     "--verbose",
     "--cov=scrapernhl",
     "--cov-report=html",
-    "--cov-report=term-missing",
+    "--cov-report=term-missing"
 ]
 
 [tool.black]
