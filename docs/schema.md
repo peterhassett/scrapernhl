@@ -21,7 +21,7 @@ Each table specifies column names, types, and primary keys. See `final_schema.sq
   - Version control this file and update it with every schema change.
 
 - **Migrations:**
-  - For production, use a migration tool (e.g., [Supabase migrations](https://supabase.com/docs/guides/database/migrations), Alembic, or Flyway) to apply changes incrementally.
+  - For production, use a migration tool (e.g., Alembic or Flyway) to apply changes incrementally.
   - Each migration should be a separate SQL file or migration script.
   - Test migrations on a staging DB before production.
 
@@ -42,7 +42,7 @@ To update `final_schema.sql` after data model changes:
 python sql_generator.py
 ```
 
-## Example Migration (Supabase)
+## Example Migration
 
 ```sql
 -- 2026-01-17_add_new_column_to_teams.sql
@@ -52,11 +52,11 @@ ALTER TABLE teams ADD COLUMN new_column TEXT;
 Apply with:
 
 ```bash
-supabase db push
+
 ```
 
 ## References
-- [Supabase Migrations Guide](https://supabase.com/docs/guides/database/migrations)
+
 - [Postgres Docs](https://www.postgresql.org/docs/)
 
 ---

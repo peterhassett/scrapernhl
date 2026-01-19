@@ -9,7 +9,7 @@ The main goal is to extract all data obtained by the NHL scraper and store it in
 - Only the "default" name fields are required; translated/alternate names are ignored.
 
 ## Data Pipeline
-- The scraper runs (via GitHub Actions or similar automation), collects data, and writes to a database (Supabase/Postgres or other, as needed).
+- The scraper runs (via GitHub Actions or similar automation), collects data, and writes to a database (Postgres or other, as needed).
 - Two main jobs:
   1. **Nightly Job:** Runs overnight to fetch the previous day's data.
   2. **Catch-up Job:** Runs on demand to backfill data, including for previous seasons.
@@ -29,7 +29,7 @@ The main goal is to extract all data obtained by the NHL scraper and store it in
 - GitHub Actions workflows are used for automation. See the `.github/workflows/` directory for job definitions.
 
 ## Alternatives
-- While Supabase/Postgres is currently used, other databases are possible if they better fit future requirements.
+- While Postgres is currently used, other databases are possible if they better fit future requirements.
 
 ---
 

@@ -4,12 +4,7 @@ import numpy as np
 
 # Helper: get valid columns from DB schema (Supabase/Postgres)
 def get_valid_cols(table_name):
-    from supabase import create_client
-    supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_KEY")
-    if not supabase_url or not supabase_key:
-        return None
-    supabase = create_client(supabase_url, supabase_key)
+    # Removed Supabase integration
     try:
         res = supabase.table(table_name).select("*").limit(1).execute()
         return list(res.data[0].keys()) if res.data else []

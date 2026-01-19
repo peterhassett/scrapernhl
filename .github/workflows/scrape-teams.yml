@@ -1,0 +1,29 @@
+name: Scrape NHL Teams
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *' # Runs every day at 6:00 UTC
+
+jobs:
+  scrape-teams:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install .
+      - name: Scrape NHL teams
+        run: |
+          python -m scrapernhl.cli teams --format csv
+      - name: Upload output
+        uses: actions/upload-artifact@v4
+        with:
+          name: nhl_teams_csv
+          path: nhl_teams.csv
